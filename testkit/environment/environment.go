@@ -233,6 +233,7 @@ func Provision(sess *session.Session, name string, config *Config) (*Environment
 		return nil, err
 	}
 
+	now := time.Now()
 	logrus.Infof("Stack %s created (%s), waiting to come up...", name, *output.StackId)
 	if err := cf.WaitUntilStackCreateComplete(&cloudformation.DescribeStacksInput{
 		StackName: output.StackId,
@@ -240,5 +241,6 @@ func Provision(sess *session.Session, name string, config *Config) (*Environment
 		return nil, err
 	}
 
+	logrus.Infof("Stack %s provisioned in %s", name, time.Since(now))
 	return New(*output.StackId, sess), nil
 }
