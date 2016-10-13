@@ -13,6 +13,7 @@ import (
 )
 
 const (
+	// TODO(dperny): make configurable; probably a flag
 	region = "us-east-1"
 )
 
@@ -54,6 +55,9 @@ func init() {
 		createCmd,
 		execCmd,
 		runCmd,
+		sshCmd,
+		listCmd,
+		rmCmd,
 	)
 }
 

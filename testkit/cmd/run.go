@@ -26,18 +26,32 @@ var runCmd = &cobra.Command{
 		var (
 			env *environment.Environment
 		)
-		for r := 0; r < 100; r++ {
-			t := time.Now()
-			name := fmt.Sprintf("docker-e2e-%d%02d%02d-%d", t.Year(), t.Month(), t.Day(), r)
+		// TODO(dperny): ugly hack, cleanup
+		t := time.Now()
+		if cmd.Flags().Changed("name") {
+			// TODO(dperny): error on this is unlikely, but handle anyway
+			name, _ := cmd.Flags().GetString("name")
+			// TODO(dperny): maximum length of name is...? 22? not sure
+			if len(name) > 22 {
+				return errors.New("Maximum length of name is 22 chars")
+			}
 			env, err = environment.Provision(newSession(), name, config.Environment)
 			if err != nil {
-				// Try with another name.
-				if strings.Contains(err.Error(), "AlreadyExistsException") {
-					continue
-				}
 				return err
 			}
-			break
+		} else {
+			for r := 0; r < 100; r++ {
+				name := fmt.Sprintf("docker-e2e-%d%02d%02d-%d", t.Year(), t.Month(), t.Day(), r)
+				env, err = environment.Provision(newSession(), name, config.Environment)
+				if err != nil {
+					// Try with another name.
+					if strings.Contains(err.Error(), "AlreadyExistsException") {
+						continue
+					}
+					return err
+				}
+				break
+			}
 		}
 
 		// Bring down the environment once we're done.
@@ -46,4 +60,8 @@ var runCmd = &cobra.Command{
 
 		return runCommands(env, config)
 	},
+}
+
+func init() {
+	runCmd.Flags().String("name", "", "custom name for the stack")
 }

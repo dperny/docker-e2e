@@ -1,5 +1,7 @@
 environment:
     template: https://docker-for-aws.s3.amazonaws.com/aws/nightly/latest.json
+    # uses this public key on AWS
+    # this should be configurable
     ssh_keyname: docker-qa
     managers: 3
     workers: 5

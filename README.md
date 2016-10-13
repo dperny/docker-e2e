@@ -29,3 +29,11 @@ docker run -v /var/run/docker.sock:/var/run/docker.sock -e DOCKER_E2E_ENDPOINT=1
 ```
 
 The tests must be run on a Docker Swarm Mode manager node.
+
+Running the Tests with Testkit
+------------------------------
+
+`cd tesetkit`
+`go get -v ./...`
+`brew install awscli`
+

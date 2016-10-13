@@ -16,61 +16,87 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
 	"github.com/pkg/errors"
+
+	// TODO(dperny) debugging imports, remove all references to these
+	_ "fmt"
 )
 
-// Purge deletes stacks older than `ttl`
-func Purge(sess *session.Session, ttl time.Duration) error {
+func List(sess *session.Session) ([]*cloudformation.Stack, error) {
 	cf := cloudformation.New(sess)
 
-	input := &cloudformation.ListStacksInput{}
+	stacks := make([]*cloudformation.Stack, 0)
+
+	input := &cloudformation.DescribeStacksInput{}
 	for {
-		resp, err := cf.ListStacks(input)
+		resp, err := cf.DescribeStacks(input)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		for _, ss := range resp.StackSummaries {
-			// Skip stacks that don't belong to us.
-			// TODO(aluzzardi): Rather than checking the name we should check tags.
-			if !strings.HasPrefix(*ss.StackName, "docker-e2e-") {
-				continue
+
+		for _, stack := range resp.Stacks {
+			// fmt.Println(stack)
+			// stack.Tags is a list of Tag structs, which have fields
+			// `Key *string` and `Value *string`. yeah, really.
+			for _, tag := range stack.Tags {
+				// TODO(dperny) this is ugly, there must be a better way
+				if aws.StringValue(tag.Key) == "docker" && aws.StringValue(tag.Value) == "e2e" {
+					stacks = append(stacks, stack)
+				}
 			}
 
-			// No point in deleting already deleted stacks.
-			if *ss.StackStatus == "DELETE_COMPLETE" || *ss.StackStatus == "DELETE_IN_PROGRESS" {
-				continue
-			}
-
-			// Skip stacks that haven't yet expired (recently created)
-			creation := *ss.CreationTime
-			expiration := creation.Add(ttl)
-			if expiration.After(time.Now().UTC()) {
-				logrus.Warnf("Skipping %s (created %v ago)", *ss.StackName, time.Now().UTC().Sub(creation))
-				continue
-			}
-
-			logrus.Infof("Cleaning up %s (created %v ago)", *ss.StackName, time.Now().UTC().Sub(creation))
-			_, err = cf.DeleteStack(&cloudformation.DeleteStackInput{
-				StackName: ss.StackId,
-			})
-			if err != nil {
-				logrus.Errorf("Failed to delete %s: %v", *ss.StackName, err)
-			}
 		}
 
 		if resp.NextToken == nil {
-			return nil
+			return stacks, nil
 		}
-
-		input.NextToken = resp.NextToken
 	}
 }
 
+// DeleteStack deletes a stack by its name
+func DeleteStack(sess *session.Session, stack *string) error {
+	// TODO(dperny) consider just passing in a cf parameter? Not sure the difference
+	cf := cloudformation.New(sess)
+	_, err := cf.DeleteStack(&cloudformation.DeleteStackInput{
+		StackName: stack,
+	})
+	return err
+}
+
+// Purge deletes stacks older than `ttl`
+func Purge(sess *session.Session, ttl time.Duration) error {
+	stacks, err := List(sess)
+	if err != nil {
+		return err
+	}
+
+	for _, stack := range stacks {
+		// Skip stacks that haven't yet expired (recently created)
+		creation := *stack.CreationTime
+		expiration := creation.Add(ttl)
+		if expiration.After(time.Now().UTC()) {
+			logrus.Warnf("Skipping %s (created %v ago)", *stack.StackName, time.Now().UTC().Sub(creation))
+			continue
+		}
+
+		logrus.Infof("Cleaning up %s (created %v ago)", *stack.StackName, time.Now().UTC().Sub(creation))
+		err := DeleteStack(sess, stack.StackId)
+		if err != nil {
+			logrus.Errorf("Failed to delete %s: %v", *stack.StackName, err)
+		}
+	}
+
+	return nil
+}
+
+// Environment represents a testing cluster, including a CloudFormation stack
+// and SSH client
 type Environment struct {
 	id     string
 	cf     *cloudformation.CloudFormation
 	client *ssh.Client
 }
 
+// New returns a new environment
 func New(id string, sess *session.Session) *Environment {
 	return &Environment{
 		id: id,
@@ -78,6 +104,7 @@ func New(id string, sess *session.Session) *Environment {
 	}
 }
 
+// Destroy deletes the CloudFormation stack associated with the environment
 func (c *Environment) Destroy() error {
 	_, err := c.cf.DeleteStack(&cloudformation.DeleteStackInput{
 		StackName: aws.String(c.id),
@@ -85,7 +112,8 @@ func (c *Environment) Destroy() error {
 	return err
 }
 
-func (c *Environment) sshEndpoint() (string, error) {
+// SSHEndpoint returns the ssh endpoint of the CloudFormation stack
+func (c *Environment) SSHEndpoint() (string, error) {
 	output, err := c.cf.DescribeStacks(&cloudformation.DescribeStacksInput{
 		StackName: aws.String(c.id),
 	})
@@ -164,10 +192,12 @@ func (c *Environment) Connect() error {
 	return nil
 }
 
+// Disconnect disconnects the SSH connection to the CloudFormation stack
 func (c *Environment) Disconnect() error {
 	return c.client.Close()
 }
 
+// Run runs the commands over ssh on the CloudFormation stack
 func (c *Environment) Run(cmd string) error {
 	session, err := c.client.NewSession()
 	if err != nil {
