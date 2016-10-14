@@ -19,10 +19,9 @@ var removeCmd = &cobra.Command{
 		env := environment.New(args[0], newSession())
 
 		if err := env.Destroy(); err != nil {
-			fmt.Printf("%v\n", args[0])
-			return nil
-		} else {
 			return err
 		}
+		fmt.Printf("%v\n", args[0])
+		return nil
 	},
 }
