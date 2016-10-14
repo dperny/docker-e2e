@@ -9,15 +9,16 @@ import (
 )
 
 // TODO(dperny) accept a list of environments to delete
-var rmCmd = &cobra.Command{
+var removeCmd = &cobra.Command{
 	Use:   "rm <environmentname>",
 	Short: "delete an environment",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return errors.New("Environment name missing")
 		}
+		env := environment.New(args[0], newSession())
 
-		if err := environment.DeleteStack(newSession(), &args[0]); err != nil {
+		if err := env.Destroy(); err != nil {
 			fmt.Printf("%v\n", args[0])
 			return nil
 		} else {

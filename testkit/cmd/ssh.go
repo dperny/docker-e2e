@@ -17,11 +17,11 @@ var sshCmd = &cobra.Command{
 		}
 
 		env := environment.New(args[0], newSession())
-		if ssh, err := env.SSHEndpoint(); err != nil {
+		ssh, err := env.SSHEndpoint()
+		if err != nil {
 			return err
-		} else {
-			fmt.Printf("%v\n", ssh)
-			return nil
 		}
+		fmt.Printf("%v\n", ssh)
+		return nil
 	},
 }

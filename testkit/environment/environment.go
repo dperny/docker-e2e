@@ -16,9 +16,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
 	"github.com/pkg/errors"
-
-	// TODO(dperny) debugging imports, remove all references to these
-	_ "fmt"
 )
 
 func List(sess *session.Session) ([]*cloudformation.Stack, error) {
@@ -34,7 +31,6 @@ func List(sess *session.Session) ([]*cloudformation.Stack, error) {
 		}
 
 		for _, stack := range resp.Stacks {
-			// fmt.Println(stack)
 			// stack.Tags is a list of Tag structs, which have fields
 			// `Key *string` and `Value *string`. yeah, really.
 			for _, tag := range stack.Tags {
@@ -49,17 +45,8 @@ func List(sess *session.Session) ([]*cloudformation.Stack, error) {
 		if resp.NextToken == nil {
 			return stacks, nil
 		}
+		input.NextToken = resp.NextToken
 	}
-}
-
-// DeleteStack deletes a stack by its name
-func DeleteStack(sess *session.Session, stack *string) error {
-	// TODO(dperny) consider just passing in a cf parameter? Not sure the difference
-	cf := cloudformation.New(sess)
-	_, err := cf.DeleteStack(&cloudformation.DeleteStackInput{
-		StackName: stack,
-	})
-	return err
 }
 
 // Purge deletes stacks older than `ttl`
@@ -79,7 +66,8 @@ func Purge(sess *session.Session, ttl time.Duration) error {
 		}
 
 		logrus.Infof("Cleaning up %s (created %v ago)", *stack.StackName, time.Now().UTC().Sub(creation))
-		err := DeleteStack(sess, stack.StackId)
+		env := New(*(stack.StackId), sess)
+		err := env.Destroy()
 		if err != nil {
 			logrus.Errorf("Failed to delete %s: %v", *stack.StackName, err)
 		}

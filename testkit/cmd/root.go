@@ -57,7 +57,7 @@ func init() {
 		runCmd,
 		sshCmd,
 		listCmd,
-		rmCmd,
+		removeCmd,
 	)
 }
 
