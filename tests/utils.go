@@ -16,9 +16,7 @@ import (
 const E2EServiceLabel = "e2etesting"
 
 func GetClient() (*client.Client, error) {
-	// TODO(dperny): Determine if we need to pass any headers stuff
-	defaultHeaders := map[string]string{"User-Agent": "engine-api-cli-1.0"}
-	cli, err := client.NewClient("unix:///var/run/docker.sock", "v1.22", nil, defaultHeaders)
+	cli, err := client.NewEnvClient()
 	if err != nil {
 		return nil, err
 	}
