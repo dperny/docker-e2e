@@ -3,12 +3,16 @@ package cmd
 import (
 	"errors"
 	"fmt"
-	"strings"
 
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
+	"path/filepath"
 	"syscall"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/docker/docker-e2e/testkit/environment"
 	"github.com/spf13/cobra"
@@ -23,33 +27,83 @@ var attachCmd = &cobra.Command{
 		}
 
 		env := environment.New(args[0], newSession())
-		ssh, err := env.SSHEndpoint()
+		host, err := env.SSHEndpoint()
 		if err != nil {
 			return err
 		}
-		openTunnel(ssh)
-		return nil
+
+		var socket string
+		if cmd.Flags().Changed("socket") {
+			socket, err = cmd.Flags().GetString("socket")
+			if err != nil {
+				return err
+			}
+		} else {
+			dir, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			socket = dir + "/docker.sock"
+		}
+		verbose, err := cmd.Flags().GetBool("verbose")
+		if err != nil {
+			return err
+		}
+		err = openTunnel(host, socket, verbose)
+		return err
 	},
 }
 
 // openTunnel opens a tunnel over ssh from a socket in the local directory to
 // the docker socket on the cluster.
-func openTunnel(ssh string) {
-	fmt.Printf("opening tunnel to %v\n", ssh)
+func openTunnel(host, socket string, verbose bool) error {
+	fmt.Printf("opening tunnel to %v\n", host)
 	// set identity file
-	// TODO(dperny) use real identity
-	id := "/Users/drewerny/.ssh/swarm.pem"
+	// TODO(dperny) this is copied out of loadSSHKeys. possible to DRY?
+	usr, err := user.Current()
+	if err != nil {
+		return err
+	}
+	keyDir := filepath.Join(usr.HomeDir, "/.ssh/")
+	keys, err := ioutil.ReadDir(keyDir)
+	if err != nil {
+		return err
+	}
 
-	// split off the port number from the hostname
-	// host, port := splitHostPort(ssh)
-	host := ssh
-	// TODO(dperny) handle error
-	dir, _ := os.Getwd()
-	// TODO(dperny) add flag to specify local socket attach point
-	// set the socket file we're using
-	socket := dir + "/docker.sock"
-	// TODO(dperny) build this command in a better way
-	cmd := exec.Command("ssh", "-vnNT", "-i"+id, "-L"+socket+":/var/run/docker.sock", "docker@"+host)
+	keyfiles := []string{}
+	for _, f := range keys {
+		keyPath := filepath.Join(keyDir, f.Name())
+		key, err := ioutil.ReadFile(keyPath)
+		if err != nil {
+			continue
+		}
+		// we do ParsePrivateKey to see if the key is in fact a key. if it's
+		// not, this will return an error.
+		_, err = ssh.ParsePrivateKey(key)
+		if err != nil {
+			continue
+		}
+		keyfiles = append(keyfiles, keyPath)
+	}
+
+	// start building the command
+	opts := make([]string, 0, 4)
+	// no terminal
+	opts = append(opts, "-nNT")
+	if verbose {
+		opts = append(opts, "-v")
+	}
+	// identity files
+	for _, key := range keyfiles {
+		opts = append(opts, "-i"+key)
+	}
+
+	// socket location
+	opts = append(opts, "-L"+socket+":/var/run/docker.sock")
+	// host
+	opts = append(opts, "docker@"+host)
+
+	cmd := exec.Command("ssh", opts...)
 	// wire up the command outputs to our ouputs
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -67,16 +121,11 @@ func openTunnel(ssh string) {
 	// pass it down to the ssh command
 	cmd.Process.Signal(sig)
 	// clean up the left-over socket
-	os.Remove(socket)
+	err = os.Remove(socket)
+	return err
 }
 
-// splitHostPort the SSH host name from the port.
-// returns the hostname and the port. if no port is
-// present, returns 22.
-func splitHostPort(ssh string) (string, string) {
-	sshInfo := strings.Split(ssh, ":")
-	if len(sshInfo) < 2 {
-		return sshInfo[0], "22"
-	}
-	return sshInfo[0], sshInfo[1]
+func init() {
+	attachCmd.Flags().BoolP("verbose", "v", false, "start ssh in verbose mode (for debugging)")
+	attachCmd.Flags().String("socket", "", "the location to open the docker socket")
 }
