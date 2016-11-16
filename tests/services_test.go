@@ -24,7 +24,7 @@ func TestServicesList(t *testing.T) {
 	assert.NoError(t, err, "Client creation failed")
 
 	// list all services with the "TestServiceList" label
-	opts := types.ServiceListOptions{Filter: GetTestFilter("TestServiceList")}
+	opts := types.ServiceListOptions{Filters: GetTestFilter("TestServiceList")}
 	services, err := cli.ServiceList(context.Background(), opts)
 	// there shouldn't be any services with that label
 	assert.NoError(t, err, "error listing service")
