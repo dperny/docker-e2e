@@ -16,9 +16,7 @@ import (
 const E2EServiceLabel = "e2etesting"
 
 func GetClient() (*client.Client, error) {
-	// TODO(dperny): Determine if we need to pass any headers stuff
-	defaultHeaders := map[string]string{"User-Agent": "engine-api-cli-1.0"}
-	cli, err := client.NewClient("unix:///var/run/docker.sock", "v1.22", nil, defaultHeaders)
+	cli, err := client.NewEnvClient()
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +28,7 @@ func CleanTestServices(ctx context.Context, cli *client.Client, labels ...string
 	// create a new filter for our test label
 	f := GetTestFilter(labels...)
 	opts := types.ServiceListOptions{
-		Filter: f,
+		Filters: f,
 	}
 	// get the services with that label
 	services, err := cli.ServiceList(ctx, opts)
@@ -124,7 +122,7 @@ func GetServiceTasks(ctx context.Context, cli *client.Client, serviceID string) 
 	filterArgs.Add("desired-state", "ready")
 	// on the service we're requesting
 	filterArgs.Add("service", serviceID)
-	return cli.TaskList(ctx, types.TaskListOptions{Filter: filterArgs})
+	return cli.TaskList(ctx, types.TaskListOptions{Filters: filterArgs})
 }
 
 // GetTestFilter creates a default filter for labels
@@ -166,11 +164,20 @@ func ScaleCheck(serviceID string, cli *client.Client) func(context.Context, int)
 	}
 }
 
-// ServiceScale scales a service to the provided number
-/*
-func ServiceScale(ctx context.Context, cli *client.Client, serviceID string, replicas uint64) (serviceID, error) {
-	service, _, err = cli.ServiceInspectWithRaw(ctx, serviceID)
-	spec := service.Spec
-	spec.Mode.Replicated.Replicas = &replicas
+// GetNodeIps returns a list of all node IP addresses in the cluster
+func GetNodeIps(cli *client.Client) ([]string, error) {
+	nodes, err := cli.NodeList(context.TODO(), types.NodeListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	// standard cluster is like 3 managers 5 workers, so 8 is a good start
+	ips := make([]string, 0, 8)
+	for _, node := range nodes {
+		ip := node.Status.Addr
+		if ip == "" {
+			return nil, errors.New("some node didn't have an associated IP")
+		}
+		ips = append(ips, ip)
+	}
+	return ips, nil
 }
-*/

@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -74,13 +73,14 @@ func TestNetworkExternalLb(t *testing.T) {
 	containers := make(map[string]int)
 	// create a mutex to synchronize access to this map
 	mu := new(sync.Mutex)
-	// get the network endpoint we're going to hit
-	var endpoint string
-	if e := os.Getenv("DOCKER_E2E_ENDPOINT"); e != "" {
-		endpoint = e
-	} else {
-		endpoint = "127.0.0.1"
-	}
+
+	// select the network endpoint we're going to hit
+	// list the nodes
+	ips, err := GetNodeIps(cli)
+	assert.NoError(t, err, "error listing nodes to get IP")
+	assert.NotZero(t, ips, "no node ip addresses were returned")
+	// take the first node
+	endpoint := ips[0]
 
 	// first we need a function to poll containers, and let it run
 	go func() {
@@ -117,7 +117,6 @@ func TestNetworkExternalLb(t *testing.T) {
 						return
 					}
 					name := strings.TrimSpace(string(namebytes))
-					// fmt.Printf("saw container: %v\n", name)
 
 					// if the container has already been seen, increment its count
 					if count, ok := containers[name]; ok {
@@ -140,7 +139,6 @@ func TestNetworkExternalLb(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		c := len(containers)
-		// fmt.Printf("saw %v containers\n", c)
 		// check if we have too many containers (unlikely but possible)
 		if c > replicas {
 			// cancel the context, we have overshot and will never converge
@@ -164,8 +162,6 @@ func TestNetworkExternalLb(t *testing.T) {
 	err = WaitForConverge(ctx, time.Second, checkComplete)
 	// cancel the context to stop polling
 	cancel()
-
-	// fmt.Printf("saw these containers like this: %v\n", containers)
 
 	assert.NoError(t, err)
 
