@@ -2,7 +2,7 @@ package dockere2e
 
 import (
 	"context"
-	// "strings"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -44,13 +44,26 @@ func CleanTestServices(ctx context.Context, cli *client.Client, labels ...string
 	return nil
 }
 
+// truncServiceName truncates the service name to 62 characters
+func truncServiceName(name string) string {
+	// we don't need to truncate anything less than 63 characters
+	if len(name) < 63 {
+		return name
+	}
+	// take only the first 63 characters, and trim off any dashes.
+	return strings.Trim(name[0:63], "-")
+}
+
 // CannedServiceSpec returns a ready-to-go service spec with name and replicas
 func CannedServiceSpec(name string, replicas uint64, labels ...string) swarm.ServiceSpec {
 	// first create the canned spec
 	spec := swarm.ServiceSpec{
 		Annotations: swarm.Annotations{
-			Name:   name,
-			Labels: map[string]string{E2EServiceLabel: "true"},
+			Name: truncServiceName(name + Uuid()),
+			Labels: map[string]string{
+				E2EServiceLabel: "true",
+				"uuid":          Uuid(),
+			},
 		},
 		TaskTemplate: swarm.TaskSpec{
 			ContainerSpec: swarm.ContainerSpec{
@@ -131,6 +144,7 @@ func GetServiceTasks(ctx context.Context, cli *client.Client, serviceID string) 
 func GetTestFilter(labels ...string) filters.Args {
 	filterArgs := filters.NewArgs()
 	filterArgs.Add("label", E2EServiceLabel)
+	filterArgs.Add("label", "uuid="+Uuid())
 	for _, l := range labels {
 		filterArgs.Add("label", l)
 	}
@@ -144,7 +158,7 @@ func ScaleCheck(serviceID string, cli *client.Client) func(context.Context, int)
 	return func(ctx context.Context, replicas int) func() error {
 		return func() error {
 			// get all of the tasks for the service
-			tasks, err := GetServiceTasks(ctx, cli, serviceID)
+			tasks, err := GetServiceTasks(context.TODO(), cli, serviceID)
 			if err != nil {
 				return errors.Wrap(err, "failed to get service tasks")
 			}

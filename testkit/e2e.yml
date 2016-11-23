@@ -2,7 +2,7 @@ environment:
     template: https://docker-for-aws.s3.amazonaws.com/aws/nightly/latest.json
     # uses this public key on AWS
     # this should be configurable
-    ssh_keyname: docker-qa
+    ssh_keyname: swarm
     managers: 3
     workers: 5
     instance_type: t2.micro

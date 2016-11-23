@@ -31,6 +31,7 @@ func TestNetworkExternalLb(t *testing.T) {
 	assert.NoError(t, err, "Client creation failed")
 
 	replicas := 3
+	// pass literal 3 so we don't have to cast
 	spec := CannedServiceSpec(name, 3, name)
 	// use nginx
 	spec.TaskTemplate.ContainerSpec.Image = "dperny/docker-sample-nginx"
@@ -40,9 +41,8 @@ func TestNetworkExternalLb(t *testing.T) {
 		Mode: swarm.ResolutionModeVIP,
 		Ports: []swarm.PortConfig{
 			{
-				Protocol:      swarm.PortConfigProtocolTCP,
-				TargetPort:    80,
-				PublishedPort: 8080,
+				Protocol:   swarm.PortConfigProtocolTCP,
+				TargetPort: 80,
 			},
 		},
 	}
@@ -58,6 +58,16 @@ func TestNetworkExternalLb(t *testing.T) {
 	scaleCheck := ScaleCheck(service.ID, cli)
 	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 3))
 	assert.NoError(t, err)
+
+	var published uint32
+	full, _, err := cli.ServiceInspectWithRaw(context.TODO(), service.ID)
+	assert.NoError(t, err, "Error getting newly created service")
+	for _, port := range full.Endpoint.Ports {
+		if port.TargetPort == 80 {
+			published = port.PublishedPort
+		}
+	}
+	port := fmt.Sprintf(":%v", published)
 
 	// create a context, and also grab the cancelfunc
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -101,7 +111,7 @@ func TestNetworkExternalLb(t *testing.T) {
 
 					// poll the endpoint
 					// TODO(dperny): this string concat is probably Bad
-					resp, err := client.Get("http://" + endpoint + ":8080")
+					resp, err := client.Get("http://" + endpoint + port)
 					if err != nil {
 						// TODO(dperny) properly handle error
 						// fmt.Printf("error: %v", err)
@@ -117,6 +127,7 @@ func TestNetworkExternalLb(t *testing.T) {
 						return
 					}
 					name := strings.TrimSpace(string(namebytes))
+					fmt.Printf("saw %v\n", name)
 
 					// if the container has already been seen, increment its count
 					if count, ok := containers[name]; ok {
@@ -162,6 +173,10 @@ func TestNetworkExternalLb(t *testing.T) {
 	err = WaitForConverge(ctx, time.Second, checkComplete)
 	// cancel the context to stop polling
 	cancel()
+
+	mu.Lock()
+	fmt.Printf("%v\n", containers)
+	mu.Unlock()
 
 	assert.NoError(t, err)
 
