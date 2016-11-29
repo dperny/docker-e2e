@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -15,13 +14,14 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
+	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/pkg/errors"
 )
 
 func List(sess *session.Session) ([]*cloudformation.Stack, error) {
 	cf := cloudformation.New(sess)
 
-	stacks := make([]*cloudformation.Stack, 0)
+	stacks := []*cloudformation.Stack{}
 
 	input := &cloudformation.DescribeStacksInput{}
 	for {
@@ -79,16 +79,18 @@ func Purge(sess *session.Session, ttl time.Duration) error {
 // Environment represents a testing cluster, including a CloudFormation stack
 // and SSH client
 type Environment struct {
-	id     string
-	cf     *cloudformation.CloudFormation
-	client *ssh.Client
+	id      string
+	cf      *cloudformation.CloudFormation
+	session *session.Session
+	client  *ssh.Client
 }
 
 // New returns a new environment
 func New(id string, sess *session.Session) *Environment {
 	return &Environment{
-		id: id,
-		cf: cloudformation.New(sess),
+		id:      id,
+		cf:      cloudformation.New(sess),
+		session: sess,
 	}
 }
 
@@ -100,27 +102,93 @@ func (c *Environment) Destroy() error {
 	return err
 }
 
-// SSHEndpoint returns the ssh endpoint of the CloudFormation stack
+// SSHEndpoint returns an ssh endpoint of the CloudFormation stack
 func (c *Environment) SSHEndpoint() (string, error) {
+	// get a list of all of the manager ips
+	ips, err := c.ManagerIPs()
+	if err != nil {
+		return "", err
+	}
+
+	// we should never get 0 ip addresses back from ManagerIPs without error,
+	// but just in case, we should check to avoid segfaulting
+	if len(ips) == 0 {
+		return "", errors.New("no ip addresses found")
+	}
+
+	// return the first endpoint. it's as good as any other
+	// TODO(dperny) should we append the port? i think probably not
+	return ips[0], nil
+}
+
+// ManagerIPs returns a list of IP addresses of manager nodes
+func (c *Environment) ManagerIPs() ([]string, error) {
 	output, err := c.cf.DescribeStacks(&cloudformation.DescribeStacksInput{
 		StackName: aws.String(c.id),
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(output.Stacks) != 1 {
-		return "", errors.New("stack not found")
+		return nil, errors.New("stack not found")
+	}
+	stack := output.Stacks[0]
+
+	// create a new EC2 client so we can list EC2 instances
+	ec2client := ec2.New(c.session)
+
+	// use the swarm info as filters
+	//   swarm-stack-id: from describe stack
+	//   swarm-node-type: manager
+	// if the above API ever changes (lol) we can use these two tags instead:
+	//   aws:cloudformation:stack-id: from describe stack
+	//   aws:cloudformation:logical-id: ManagerAsg
+	input := &ec2.DescribeInstancesInput{
+		Filters: []*ec2.Filter{
+			&ec2.Filter{
+				Name:   aws.String("tag:swarm-stack-id"),
+				Values: []*string{stack.StackId},
+			},
+			&ec2.Filter{
+				Name:   aws.String("tag:swarm-node-type"),
+				Values: []*string{aws.String("manager")},
+			},
+		},
 	}
 
-	for _, o := range output.Stacks[0].Outputs {
-		if *o.OutputKey == "SSH" {
-			// Formatted as "ssh docker@docker-e2e-20160928-ELB-SSH-1653593963.us-east-1.elb.amazonaws.com"
-			endpoint := *o.OutputValue
-			return strings.SplitN(endpoint, "@", 2)[1] + ":22", nil
+	// slice of ip addresses. we can expect at least 3, probably, so 3 is a
+	// good starting value
+	ips := []string{}
+	// loop until we have no next page
+	for {
+		// do the api call, check for errors. duh.
+		resp, err := ec2client.DescribeInstances(input)
+		if err != nil {
+			return nil, err
 		}
+
+		// instances may or may not belong to the same reservation. we don't
+		// care, and we must iterate through both together as a rule
+		for _, res := range resp.Reservations {
+			for _, instance := range res.Instances {
+				ips = append(ips, *instance.PublicIpAddress)
+			}
+		}
+
+		if resp.NextToken == nil {
+			break
+		}
+		// set the next token, in case our response has multiple pages
+		input.NextToken = resp.NextToken
 	}
 
-	return "", errors.New("unable to retrieve SSH endpoint")
+	// make sure we actually have ip addresses, so that we don't just return
+	// emptystring and no error.
+	if len(ips) == 0 {
+		return nil, errors.New("unable to retrieve SSH endpoint, found no managers")
+	}
+
+	return ips, nil
 }
 
 func (c *Environment) loadSSHKeys() (ssh.AuthMethod, error) {
@@ -154,10 +222,11 @@ func (c *Environment) loadSSHKeys() (ssh.AuthMethod, error) {
 }
 
 func (c *Environment) Connect() error {
-	endpoint, err := c.sshEndpoint()
+	endpoint, err := c.SSHEndpoint()
 	if err != nil {
 		return err
 	}
+	endpoint = endpoint + ":22"
 
 	auth, err := c.loadSSHKeys()
 	if err != nil {
