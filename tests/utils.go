@@ -62,6 +62,7 @@ func CannedServiceSpec(name string, replicas uint64, labels ...string) swarm.Ser
 		Annotations: swarm.Annotations{
 			Name: truncServiceName(name + UUID()),
 			Labels: map[string]string{
+				// the pre-mangled service name is a raw key-only label.
 				name:            "",
 				E2EServiceLabel: "true",
 				"uuid":          UUID(),
@@ -77,6 +78,7 @@ func CannedServiceSpec(name string, replicas uint64, labels ...string) swarm.Ser
 
 	// then, add labels
 	for _, label := range labels {
+		// TODO(dperny): allow labels in form key=value?
 		spec.Annotations.Labels[label] = ""
 	}
 
