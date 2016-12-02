@@ -26,12 +26,14 @@ func TestNetworkExternalLb(t *testing.T) {
 	// TODO(dperny): there are debugging statements commented out. remove them.
 	t.Parallel()
 	name := "TestNetworkExternalLb"
+	testContext, _ := context.WithTimeout(context.Background(), time.Minute)
 	// create a client
 	cli, err := GetClient()
 	assert.NoError(t, err, "Client creation failed")
 
 	replicas := 3
-	spec := CannedServiceSpec(name, 3, name)
+	// pass literal 3 so we don't have to cast
+	spec := CannedServiceSpec(name, uint64(replicas))
 	// use nginx
 	spec.TaskTemplate.ContainerSpec.Image = "dperny/docker-sample-nginx"
 	spec.TaskTemplate.ContainerSpec.Command = nil
@@ -40,27 +42,37 @@ func TestNetworkExternalLb(t *testing.T) {
 		Mode: swarm.ResolutionModeVIP,
 		Ports: []swarm.PortConfig{
 			{
-				Protocol:      swarm.PortConfigProtocolTCP,
-				TargetPort:    80,
-				PublishedPort: 8080,
+				Protocol:   swarm.PortConfigProtocolTCP,
+				TargetPort: 80,
 			},
 		},
 	}
 
 	// create the service
-	service, err := cli.ServiceCreate(context.Background(), spec, types.ServiceCreateOptions{})
+	service, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
 	assert.NoError(t, err, "Error creating service")
 	assert.NotNil(t, service, "Resp is nil for some reason")
 	assert.NotZero(t, service.ID, "serviceonse ID is zero, something is amiss")
 
 	// now make sure the service comes up
-	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, _ := context.WithTimeout(testContext, 30*time.Second)
 	scaleCheck := ScaleCheck(service.ID, cli)
 	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 3))
 	assert.NoError(t, err)
 
+	var published uint32
+	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID)
+	assert.NoError(t, err, "Error getting newly created service")
+	for _, port := range full.Endpoint.Ports {
+		if port.TargetPort == 80 {
+			published = port.PublishedPort
+			break
+		}
+	}
+	port := fmt.Sprintf(":%v", published)
+
 	// create a context, and also grab the cancelfunc
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
 
 	// alright now comes the tricky part. we're gonna hit the endpoint
 	// repeatedly until we get 3 different container ids, twice each.
@@ -101,7 +113,7 @@ func TestNetworkExternalLb(t *testing.T) {
 
 					// poll the endpoint
 					// TODO(dperny): this string concat is probably Bad
-					resp, err := client.Get("http://" + endpoint + ":8080")
+					resp, err := client.Get("http://" + endpoint + port)
 					if err != nil {
 						// TODO(dperny) properly handle error
 						// fmt.Printf("error: %v", err)
@@ -117,6 +129,7 @@ func TestNetworkExternalLb(t *testing.T) {
 						return
 					}
 					name := strings.TrimSpace(string(namebytes))
+					// fmt.Printf("saw %v\n", name)
 
 					// if the container has already been seen, increment its count
 					if count, ok := containers[name]; ok {
@@ -165,5 +178,5 @@ func TestNetworkExternalLb(t *testing.T) {
 
 	assert.NoError(t, err)
 
-	CleanTestServices(context.Background(), cli, name)
+	CleanTestServices(testContext, cli, name)
 }
