@@ -32,7 +32,6 @@ func TestNetworkExternalLb(t *testing.T) {
 	assert.NoError(t, err, "Client creation failed")
 
 	replicas := 3
-	// pass literal 3 so we don't have to cast
 	spec := CannedServiceSpec(name, uint64(replicas))
 	// use nginx
 	spec.TaskTemplate.ContainerSpec.Image = "dperny/docker-sample-nginx"
