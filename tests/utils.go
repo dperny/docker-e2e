@@ -55,6 +55,14 @@ func truncServiceName(name string) string {
 	return strings.Trim(name[0:63], "-")
 }
 
+func CannedGlobalServiceSpec(name string, labels ...string) swarm.ServiceSpec {
+	// get a canned service spec
+	spec := CannedServiceSpec(name, 0, labels...)
+	// set global mode for the service.
+	spec.Mode = swarm.ServiceMode{Global: &swarm.GlobalService{}}
+	return spec
+}
+
 // CannedServiceSpec returns a ready-to-go service spec with name and replicas
 func CannedServiceSpec(name string, replicas uint64, labels ...string) swarm.ServiceSpec {
 	// first create the canned spec
