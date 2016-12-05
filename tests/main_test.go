@@ -44,6 +44,7 @@ func TestMain(m *testing.M) {
 		os.Exit(exit)
 	}()
 
+	fmt.Printf("Running tests with UUID %v\n", UUID())
 	// run the tests, save the exit
 	exit = m.Run()
 	// close the done channel to run cleanup
