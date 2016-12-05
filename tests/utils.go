@@ -109,19 +109,30 @@ func WaitForConverge(ctx context.Context, poll time.Duration, test func() error)
 			return errors.Wrap(err, "failed to converge")
 		case <-r.C:
 			// do test, save the error
-			err = test()
+			nextErr := test()
 			// TODO(dperny) ughhhhhhhhhhhhhhhhhhhhh
 			// if the context times out during a call to the docker api, we
 			// will get context deadline exceeded which could mask the real
 			// error. in this case, if we already have an error, discard the
 			// the deadline exceeded error
-			/*
-				if err == nil ||
-					terr == nil ||
-					(terr != nil && !strings.Contains(terr.Error(), "context deadline exceeded")) {
-					err = terr
+
+			// if we haven't caught an error yet, keep this one no matter what
+			// OR, if nextErr is nil.
+			if err == nil || nextErr == nil {
+				err = nextErr
+			}
+
+			// if we have already caught an error, and we just caught another one
+			if err != nil && nextErr != nil {
+				// check if it's a not context deadline exceeded error
+				if !strings.Contains(nextErr.Error(), "context deadline exceeded") {
+					// if it isn't, then it's useful; keep it
+					err = nextErr
 				}
-			*/
+				// if it was context deadline exceed, go with whatever the last
+				// error was, but wrap it to tell the user
+				err = errors.Wrap(err, "context deadline exceeded. last recorded failure condition wrapped.")
+			}
 		}
 		// if there is no error, we're done
 		if err == nil {
