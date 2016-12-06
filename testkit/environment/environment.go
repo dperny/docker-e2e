@@ -3,6 +3,7 @@ package environment
 import (
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -116,9 +117,8 @@ func (c *Environment) SSHEndpoint() (string, error) {
 		return "", errors.New("no ip addresses found")
 	}
 
-	// return the first endpoint. it's as good as any other
 	// TODO(dperny) should we append the port? i think probably not
-	return ips[0], nil
+	return ips[rand.Intn(len(ips))], nil
 }
 
 // ManagerIPs returns a list of IP addresses of manager nodes
