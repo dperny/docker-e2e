@@ -34,7 +34,7 @@ func TestNetworkExternalLb(t *testing.T) {
 	replicas := 3
 	spec := CannedServiceSpec(name, uint64(replicas))
 	// use nginx
-	spec.TaskTemplate.ContainerSpec.Image = "dperny/docker-sample-nginx"
+	spec.TaskTemplate.ContainerSpec.Image = "dperny/httptest"
 	spec.TaskTemplate.ContainerSpec.Command = nil
 	// expose a port
 	spec.EndpointSpec = &swarm.EndpointSpec{
