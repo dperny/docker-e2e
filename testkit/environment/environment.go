@@ -4,12 +4,14 @@ import (
 	"io"
 	"io/ioutil"
 	"math/rand"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/aws"
@@ -84,6 +86,7 @@ type Environment struct {
 	cf      *cloudformation.CloudFormation
 	session *session.Session
 	client  *ssh.Client
+	agent   net.Conn
 }
 
 // New returns a new environment
@@ -218,6 +221,23 @@ func (c *Environment) loadSSHKeys() (ssh.AuthMethod, error) {
 		logrus.Infof("Loaded %s (%s)", keyPath, signer.PublicKey().Type())
 	}
 
+	if sshAgentSock := os.Getenv("SSH_AUTH_SOCK"); sshAgentSock != "" {
+		conn, err := net.Dial("unix", sshAgentSock)
+		if err != nil {
+			return nil, errors.Wrap(err, "unable to open ssh agent")
+		}
+		agent := agent.NewClient(conn)
+		agentSigners, err := agent.Signers()
+		if err != nil {
+			conn.Close()
+			return nil, errors.Wrap(err, "failed to get agent signers")
+		}
+
+		logrus.Infof("Loaded %d agent keys", len(agentSigners))
+		signers = append(signers, agentSigners...)
+		c.agent = conn
+	}
+
 	return ssh.PublicKeys(signers...), nil
 }
 
@@ -251,6 +271,10 @@ func (c *Environment) Connect() error {
 
 // Disconnect disconnects the SSH connection to the CloudFormation stack
 func (c *Environment) Disconnect() error {
+	if c.agent != nil {
+		c.agent.Close()
+		c.agent = nil
+	}
 	return c.client.Close()
 }
 
