@@ -44,9 +44,13 @@ func CleanTestServices(ctx context.Context, cli *client.Client, labels ...string
 	return nil
 }
 
-// truncServiceName truncates the service name to 63 characters, or 62 if the
+func MangleObjectName(name string) string {
+	return truncObjectName(name + UUID())
+}
+
+// truncObjectName truncates the service name to 63 characters, or 62 if the
 // last character is a dash.
-func truncServiceName(name string) string {
+func truncObjectName(name string) string {
 	// we don't need to truncate anything less than 63 characters
 	if len(name) < 63 {
 		return name
@@ -60,7 +64,7 @@ func CannedServiceSpec(name string, replicas uint64, labels ...string) swarm.Ser
 	// first create the canned spec
 	spec := swarm.ServiceSpec{
 		Annotations: swarm.Annotations{
-			Name: truncServiceName(name + UUID()),
+			Name: MangleObjectName(name),
 			Labels: map[string]string{
 				// the pre-mangled service name is a raw key-only label.
 				name:            "",
