@@ -47,7 +47,7 @@ func pollEndpoint(ctx context.Context, endpoint string, containers map[string]in
 				resp, err := client.Get("http://" + endpoint)
 				if err != nil {
 					// TODO(dperny) properly handle error
-					// fmt.Printf("error: %v", err)
+					fmt.Printf("error polling endpoint: %v\n", err)
 					return
 				}
 
@@ -259,4 +259,70 @@ func TestNetworkExternalLbReplicated(t *testing.T) {
 	assert.NoError(t, err)
 
 	CleanTestServices(testContext, cli, name)
+}
+
+func TestNetworkInternalLb(t *testing.T) {
+	t.Parallel()
+	name := "TestNetworkInternalLb"
+	testContext, testCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// cancel the context to avoid leaking
+	defer testCancel()
+
+	// create a client
+	cli, err := GetClient()
+	require.NoError(t, err, "Client creation failed")
+
+	// create a network
+	_, err = cli.NetworkCreate(testContext, MangleObjectName(name), types.NetworkCreate{
+		Driver: "overlay",
+	})
+	require.NoError(t, err, "couldn't create network")
+
+	// create the internal network service
+	replicas := 6
+	spec := cannedNetworkServiceSpec(name+"Internal", uint64(replicas))
+	spec.EndpointSpec = nil
+	spec.Networks = []swarm.NetworkAttachmentConfig{{Target: MangleObjectName(name)}}
+	internal, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
+	require.NoError(t, err, "error creating internal service")
+	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
+	err = WaitForConverge(ctx, time.Second, ScaleCheck(internal.ID, cli)(ctx, replicas))
+	assert.NoError(t, err)
+	cancel()
+
+	extReplicas := 1
+	// create the external service
+	externalSpec := cannedNetworkServiceSpec(name+"External", uint64(extReplicas))
+	externalSpec.Networks = []swarm.NetworkAttachmentConfig{{Target: MangleObjectName(name)}}
+	external, err := cli.ServiceCreate(testContext, externalSpec, types.ServiceCreateOptions{})
+	require.NoError(t, err, "error creating external service")
+	ctx, cancel = context.WithTimeout(testContext, 30*time.Second)
+	err = WaitForConverge(ctx, time.Second, ScaleCheck(external.ID, cli)(ctx, extReplicas))
+	assert.NoError(t, err)
+	cancel()
+
+	// get the published port
+	full, _, err := cli.ServiceInspectWithRaw(testContext, external.ID)
+	assert.NoError(t, err)
+	published, err := getServicePublishedPort(&full, 80)
+	require.NoError(t, err)
+	port := fmt.Sprintf(":%v", published)
+
+	ips, _ := GetNodeIps(cli)
+	// TODO(dperny) error check
+	endpoint := ips[0] + port + "/proxy/" + spec.Name
+
+	containers := make(map[string]int)
+	mu := new(sync.Mutex)
+	ctx, cancel = context.WithTimeout(testContext, 30*time.Second)
+
+	go pollEndpoint(ctx, endpoint, containers, mu)
+	check := checkComplete(replicas, containers, mu, cancel)
+	err = WaitForConverge(ctx, time.Second, check)
+	assert.NoError(t, err)
+	cancel()
+	// remove network
+	cli.NetworkRemove(testContext, MangleObjectName(name))
+
+	fmt.Printf("%v\n", containers)
 }
