@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -25,113 +26,6 @@ import (
 )
 
 const NetworkTestImage string = "dperny/httptest"
-
-func pollEndpoint(ctx context.Context, endpoint string, containers map[string]int, mu *sync.Mutex) {
-	for {
-		select {
-		case <-ctx.Done():
-			// stop polling when ctx is done
-			return
-		default:
-			// anonymous func to leverage defers
-			func() {
-				// TODO(dperny) consider breaking out into separate function
-				// lock the mutex to synchronize access to the map
-				mu.Lock()
-				defer mu.Unlock()
-				tr := &http.Transport{}
-				client := &http.Client{Transport: tr, Timeout: time.Duration(5 * time.Second)}
-
-				// poll the endpoint
-				// TODO(dperny): this string concat is probably Bad
-				resp, err := client.Get("http://" + endpoint)
-				if err != nil {
-					// TODO(dperny) properly handle error
-					fmt.Printf("error polling endpoint: %v\n", err)
-					return
-				}
-
-				// body text should just be the container id
-				namebytes, err := ioutil.ReadAll(resp.Body)
-				// docs say we have to close the body. defer doing so
-				defer resp.Body.Close()
-				if err != nil {
-					// TODO(dperny) properly handle error
-					return
-				}
-				name := strings.TrimSpace(string(namebytes))
-				// fmt.Printf("saw %v\n", name)
-
-				// if the container has already been seen, increment its count
-				if count, ok := containers[name]; ok {
-					containers[name] = count + 1
-					// if not, add it as a new record with count 1
-				} else {
-					containers[name] = 1
-				}
-			}()
-			// if we don't sleep, we'll starve the check function. we stop
-			// just long enough for the system to schedule the check function
-			// TODO(dperny): figure out a cleaner way to do this.
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
-}
-
-// checkComplete returns a function that can be used to check if a network test
-// has succeeded
-func checkComplete(replicas int, containers map[string]int, mu *sync.Mutex, cancel context.CancelFunc) func() error {
-	return func() error {
-		mu.Lock()
-		defer mu.Unlock()
-		c := len(containers)
-		// check if we have too many containers (unlikely but possible)
-		if c > replicas {
-			// cancel the context, we have overshot and will never converge
-			cancel()
-			return fmt.Errorf("expected %v different container IDs, got %v", replicas, c)
-		}
-		// now check if we have too few
-		if c < replicas {
-			return fmt.Errorf("haven't seen enough different containers, expected %v got %v", replicas, c)
-		}
-		// now check that we've hit each container at least 2 times
-		for name, count := range containers {
-			if count < 2 {
-				return fmt.Errorf("haven't seen container %v twice", name)
-			}
-		}
-		// if everything so far passes, we're golden
-		return nil
-	}
-}
-
-func getServicePublishedPort(service *swarm.Service, target uint32) (uint32, error) {
-	for _, port := range service.Endpoint.Ports {
-		if port.TargetPort == target {
-			return port.PublishedPort, nil
-		}
-	}
-	return 0, errors.New("Could not find target port")
-}
-
-func cannedNetworkServiceSpec(name string, replicas uint64, labels ...string) swarm.ServiceSpec {
-	spec := CannedServiceSpec(name, replicas, labels...)
-	spec.TaskTemplate.ContainerSpec.Image = NetworkTestImage
-	// TODO(dperny): explain in a comment why we set command to nil
-	spec.TaskTemplate.ContainerSpec.Command = nil
-	spec.EndpointSpec = &swarm.EndpointSpec{
-		Mode: swarm.ResolutionModeVIP,
-		Ports: []swarm.PortConfig{
-			{
-				Protocol:   swarm.PortConfigProtocolTCP,
-				TargetPort: 80,
-			},
-		},
-	}
-
-	return spec
-}
 
 func TestNetworkExternalLbGlobal(t *testing.T) {
 	// do parallel on every available test
@@ -215,6 +109,8 @@ func TestNetworkExternalLbReplicated(t *testing.T) {
 	scaleCheck := ScaleCheck(service.ID, cli)
 	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 3))
 	assert.NoError(t, err)
+	// clean up test service
+	defer CleanTestServices(testContext, cli, name)
 	// cancel context to avoid leaking
 	cancel()
 
@@ -257,13 +153,14 @@ func TestNetworkExternalLbReplicated(t *testing.T) {
 	cancel()
 
 	assert.NoError(t, err)
-
-	CleanTestServices(testContext, cli, name)
 }
 
-func TestNetworkInternalLb(t *testing.T) {
+// TestNetworkInternalLbProxy creates two services. The first one is external
+// and acts as a proxy for requests to the internal service. it checks that
+// each instance of the internal service is reachable.
+func TestNetworkInternalLbProxy(t *testing.T) {
 	t.Parallel()
-	name := "TestNetworkInternalLb"
+	name := "TestNetworkInternalLbProxy"
 	testContext, testCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	// cancel the context to avoid leaking
 	defer testCancel()
@@ -277,6 +174,8 @@ func TestNetworkInternalLb(t *testing.T) {
 		Driver: "overlay",
 	})
 	require.NoError(t, err, "couldn't create network")
+	// remove network
+	defer cli.NetworkRemove(testContext, MangleObjectName(name))
 
 	// create the internal network service
 	replicas := 6
@@ -285,6 +184,8 @@ func TestNetworkInternalLb(t *testing.T) {
 	spec.Networks = []swarm.NetworkAttachmentConfig{{Target: MangleObjectName(name)}}
 	internal, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
 	require.NoError(t, err, "error creating internal service")
+	defer CleanTestServices(testContext, cli, name+"Internal")
+
 	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
 	err = WaitForConverge(ctx, time.Second, ScaleCheck(internal.ID, cli)(ctx, replicas))
 	assert.NoError(t, err)
@@ -296,6 +197,7 @@ func TestNetworkInternalLb(t *testing.T) {
 	externalSpec.Networks = []swarm.NetworkAttachmentConfig{{Target: MangleObjectName(name)}}
 	external, err := cli.ServiceCreate(testContext, externalSpec, types.ServiceCreateOptions{})
 	require.NoError(t, err, "error creating external service")
+	defer CleanTestServices(testContext, cli, name+"External")
 	ctx, cancel = context.WithTimeout(testContext, 30*time.Second)
 	err = WaitForConverge(ctx, time.Second, ScaleCheck(external.ID, cli)(ctx, extReplicas))
 	assert.NoError(t, err)
@@ -311,6 +213,7 @@ func TestNetworkInternalLb(t *testing.T) {
 	ips, _ := GetNodeIps(cli)
 	// TODO(dperny) error check
 	endpoint := ips[0] + port + "/proxy/" + spec.Name
+	time.Sleep(time.Millisecond * 500)
 
 	containers := make(map[string]int)
 	mu := new(sync.Mutex)
@@ -321,8 +224,176 @@ func TestNetworkInternalLb(t *testing.T) {
 	err = WaitForConverge(ctx, time.Second, check)
 	assert.NoError(t, err)
 	cancel()
-	// remove network
-	cli.NetworkRemove(testContext, MangleObjectName(name))
+	// TODO(dperny) put into debug log
+	// fmt.Printf("%v\n", containers)
+}
 
-	fmt.Printf("%v\n", containers)
+// TestNetworkInternalLbEndpoints creates a service with one replica and checks
+// that it can be reached from all nodes in the service
+func TestNetworkInternalLbEndpoints(t *testing.T) {
+	t.Parallel()
+	name := "TestNetworkInternalLbEndpoints"
+	testContext, testCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// cancel to avoid leaking
+	defer testCancel()
+
+	// create a client
+	cli, err := GetClient()
+	require.NoError(t, err, "Client creation failed")
+
+	// create service
+	replicas := 1
+	spec := cannedNetworkServiceSpec(name, uint64(replicas))
+	service, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
+	assert.NoError(t, err, "Error creating service")
+	defer CleanTestServices(context.TODO(), cli, name)
+
+	// now make sure the service comes up
+	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
+	err = WaitForConverge(ctx, 1*time.Second, ScaleCheck(service.ID, cli)(ctx, replicas))
+	assert.NoError(t, err)
+	cancel()
+
+	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID)
+	published, err := getServicePublishedPort(&full, 80)
+	require.NoError(t, err)
+	port := fmt.Sprintf(":%v", published)
+
+	// pause a moment for gossip to converge
+	time.Sleep(time.Second)
+
+	// poll each endpoint, make sure we get a response
+	ips, err := GetNodeIps(cli)
+	assert.NoError(t, err, "error listing nodes to get IP")
+	assert.NotEmpty(t, ips, "no node ips were returned")
+
+	firstname := ""
+
+	// loop 3 times
+	for i := 0; i < 3; i++ {
+		for _, ip := range ips {
+			tr := &http.Transport{}
+			client := &http.Client{Transport: tr, Timeout: time.Duration(5 * time.Second)}
+			resp, err := client.Get("http://" + ip + port)
+			require.NoError(t, err, "error polling endpoint "+ip)
+			namebytes, err := ioutil.ReadAll(resp.Body)
+			defer resp.Body.Close()
+			require.NoError(t, err, "error reading body "+ip)
+			respName := strings.TrimSpace(string(namebytes))
+			if firstname == "" {
+				firstname = respName
+			} else if respName != firstname {
+				t.Errorf("task name changed from %v to %v!", name, respName)
+			}
+			// TODO(dperny) put into debug log
+			// fmt.Printf("external polled: %v, got %v\n", ip, respName)
+		}
+	}
+}
+
+func pollEndpoint(ctx context.Context, endpoint string, containers map[string]int, mu *sync.Mutex) {
+	for {
+		select {
+		case <-ctx.Done():
+			// stop polling when ctx is done
+			return
+		default:
+			// anonymous func to leverage defers
+			func() {
+				// TODO(dperny) consider breaking out into separate function
+				// lock the mutex to synchronize access to the map
+				mu.Lock()
+				defer mu.Unlock()
+				tr := &http.Transport{}
+				client := &http.Client{Transport: tr, Timeout: time.Duration(5 * time.Second)}
+
+				// poll the endpoint
+				// TODO(dperny): this string concat is probably Bad
+				resp, err := client.Get("http://" + endpoint)
+				if err != nil {
+					// TODO(dperny) properly handle error
+					fmt.Printf("error polling endpoint: %v\n", err)
+					return
+				}
+
+				// body text should just be the container id
+				namebytes, err := ioutil.ReadAll(resp.Body)
+				// docs say we have to close the body. defer doing so
+				defer resp.Body.Close()
+				if err != nil {
+					// TODO(dperny) properly handle error
+					return
+				}
+				name := strings.TrimSpace(string(namebytes))
+				// TODO(dperny) put into debug log
+				// fmt.Printf("saw %v\n", name)
+
+				// if the container has already been seen, increment its count
+				if count, ok := containers[name]; ok {
+					containers[name] = count + 1
+					// if not, add it as a new record with count 1
+				} else {
+					containers[name] = 1
+				}
+			}()
+			// if we don't sleep, we'll starve the check function. we stop
+			// just long enough for the system to schedule the check function
+			// TODO(dperny): figure out a cleaner way to do this.
+			runtime.Gosched()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+// checkComplete returns a function that can be used to check if a network test
+// has succeeded
+func checkComplete(replicas int, containers map[string]int, mu *sync.Mutex, cancel context.CancelFunc) func() error {
+	return func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		c := len(containers)
+		// check if we have too many containers (unlikely but possible)
+		if c > replicas {
+			// cancel the context, we have overshot and will never converge
+			cancel()
+			return fmt.Errorf("expected %v different container IDs, got %v", replicas, c)
+		}
+		// now check if we have too few
+		if c < replicas {
+			return fmt.Errorf("haven't seen enough different containers, expected %v got %v", replicas, c)
+		}
+		// now check that we've hit each container at least 2 times
+		for name, count := range containers {
+			if count < 2 {
+				return fmt.Errorf("haven't seen container %v twice", name)
+			}
+		}
+		// if everything so far passes, we're golden
+		return nil
+	}
+}
+
+func getServicePublishedPort(service *swarm.Service, target uint32) (uint32, error) {
+	for _, port := range service.Endpoint.Ports {
+		if port.TargetPort == target {
+			return port.PublishedPort, nil
+		}
+	}
+	return 0, errors.New("Could not find target port")
+}
+
+func cannedNetworkServiceSpec(name string, replicas uint64, labels ...string) swarm.ServiceSpec {
+	spec := CannedServiceSpec(name, replicas, labels...)
+	spec.TaskTemplate.ContainerSpec.Image = NetworkTestImage
+	spec.EndpointSpec = &swarm.EndpointSpec{
+		Mode: swarm.ResolutionModeVIP,
+		Ports: []swarm.PortConfig{
+			{
+				Protocol:   swarm.PortConfigProtocolTCP,
+				TargetPort: 80,
+			},
+		},
+	}
+
+	return spec
 }
