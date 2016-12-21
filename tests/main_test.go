@@ -11,9 +11,41 @@ import (
 	"time"
 
 	"github.com/satori/go.uuid"
+
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/swarm"
+	"github.com/docker/docker/client"
 )
 
 var testUUID string
+
+func prepareTestImages(cli *client.Client) error {
+	name := "prep"
+
+	// this isn't a test, it's just setup code. use a flat 2 minutes for the
+	// whole thing.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	nodes, err := cli.NodeList(ctx, types.NodeListOptions{})
+	if err != nil {
+		return err
+	}
+	replicas := len(nodes)
+
+	spec := CannedServiceSpec(name, 0)
+	// NetworkTestImage is defined in network_test.go
+	spec.TaskTemplate.ContainerSpec.Image = NetworkTestImage
+	spec.Mode = swarm.ServiceMode{Global: &swarm.GlobalService{}}
+
+	service, err := cli.ServiceCreate(ctx, spec, types.ServiceCreateOptions{})
+	if err != nil {
+		return err
+	}
+	defer CleanTestServices(context.TODO(), cli, name)
+
+	return WaitForConverge(ctx, time.Second, ScaleCheck(service.ID, cli)(ctx, replicas))
+}
 
 func TestMain(m *testing.M) {
 	// gotta call this at the start or NONE of the flags work
@@ -30,6 +62,11 @@ func TestMain(m *testing.M) {
 	cli, err := GetClient()
 	if err != nil {
 		os.Exit(1)
+	}
+
+	err = prepareTestImages(cli)
+	if err != nil {
+		fmt.Printf("error prepping test images: %v", err)
 	}
 
 	var exit int
