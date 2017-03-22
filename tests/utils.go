@@ -2,6 +2,8 @@ package dockere2e
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -203,6 +205,13 @@ func GetNodeIps(cli *client.Client) ([]string, error) {
 	ips := make([]string, 0, 8)
 	for _, node := range nodes {
 		ip := node.Status.Addr
+		// Prefer the manager IP if present
+		if node.ManagerStatus != nil && node.ManagerStatus.Addr != "" {
+			ip, _, err = net.SplitHostPort(node.ManagerStatus.Addr)
+			if err != nil {
+				return nil, fmt.Errorf("malformed node.ManagerStatus.Addr: %s", err)
+			}
+		}
 		if ip == "" {
 			return nil, errors.New("some node didn't have an associated IP")
 		}

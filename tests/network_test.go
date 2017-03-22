@@ -26,7 +26,7 @@ func TestNetworkExternalLb(t *testing.T) {
 	// TODO(dperny): there are debugging statements commented out. remove them.
 	t.Parallel()
 	name := "TestNetworkExternalLb"
-	testContext, _ := context.WithTimeout(context.Background(), time.Minute)
+	testContext, _ := context.WithTimeout(context.Background(), 2*time.Minute)
 	// create a client
 	cli, err := GetClient()
 	assert.NoError(t, err, "Client creation failed")
@@ -54,7 +54,7 @@ func TestNetworkExternalLb(t *testing.T) {
 	assert.NotZero(t, service.ID, "serviceonse ID is zero, something is amiss")
 
 	// now make sure the service comes up
-	ctx, _ := context.WithTimeout(testContext, 30*time.Second)
+	ctx, _ := context.WithTimeout(testContext, 60*time.Second)
 	scaleCheck := ScaleCheck(service.ID, cli)
 	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 3))
 	assert.NoError(t, err)
@@ -71,7 +71,7 @@ func TestNetworkExternalLb(t *testing.T) {
 	port := fmt.Sprintf(":%v", published)
 
 	// create a context, and also grab the cancelfunc
-	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
+	ctx, cancel := context.WithTimeout(testContext, 60*time.Second)
 
 	// alright now comes the tricky part. we're gonna hit the endpoint
 	// repeatedly until we get 3 different container ids, twice each.
@@ -115,7 +115,7 @@ func TestNetworkExternalLb(t *testing.T) {
 					resp, err := client.Get("http://" + endpoint + port)
 					if err != nil {
 						// TODO(dperny) properly handle error
-						// fmt.Printf("error: %v", err)
+						// fmt.Printf("error: %v\n", err)
 						return
 					}
 
