@@ -1,0 +1,272 @@
+package machines
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	log "github.com/Sirupsen/logrus"
+)
+
+var (
+	EngineInstallURL = os.Getenv("ENGINE_INSTALL_URL")
+	EngineInstallCMD = os.Getenv("ENGINE_INSTALL_CMD")
+	TCPPortList      = []int{
+		// Product ports
+		443, 2377, 2376, 4789, 7946, 12382, 12386, 12383, 12379, 12380, 12376, 12381, 12385, 12384, 12387,
+
+		// Test rigging ports
+		389,  // LDAP tests
+		3376, // The port we configure classic swarm on so the tests are compatible with docker-machine
+		8443, // Alternate port for controller used for some tests
+	}
+	UDPPortList = []int{
+		7946,
+	}
+
+	// Note: we can't use the hosts list, because the init system specifies -H and refuses to accept both
+	daemonJSON = map[string]string{
+		"standard": `{
+    "debug": true,
+    "tls": true,
+    "tlscacert": "/etc/docker/ca.pem",
+    "tlscert": "/etc/docker/cert.pem",
+    "tlskey": "/etc/docker/key.pem",
+    "tlsverify": true
+}
+`,
+		"devicemapper": `{
+    "debug": true,
+    "tls": true,
+    "tlscacert": "/etc/docker/ca.pem",
+    "tlscert": "/etc/docker/cert.pem",
+    "tlskey": "/etc/docker/key.pem",
+    "tlsverify": true,
+    "storage-driver": "devicemapper",
+    "storage-opts": [
+        "dm.thinpooldev=/dev/mapper/docker-thinpool",
+        "dm.use_deferred_removal=true",
+        "dm.use_deferred_deletion=true"
+    ]
+}
+`,
+		"zfs": `{
+    "debug": true,
+    "tls": true,
+    "tlscacert": "/etc/docker/ca.pem",
+    "tlscert": "/etc/docker/cert.pem",
+    "tlskey": "/etc/docker/key.pem",
+    "tlsverify": true,
+    "storage-driver": "zfs"
+}
+`,
+	}
+)
+
+func getServerVersion(m Machine) (string, error) {
+	// During bootup, docker might take a while to start, so check to see if it looks like it's there
+	out, err := m.MachineSSH("sudo docker --version")
+	if err != nil {
+		log.Debugf("Failed to check docker version: %s: %s", err, out)
+		return "", err
+	}
+	// So the client is present...
+	dclient, err := m.GetEngineAPIWithTimeout(2 * time.Second) // Very short timeout so we don't waste time
+	if err != nil {
+		return "", fmt.Errorf("Failed to get engine client: %s", err)
+	}
+	deadline := time.Now().Add(20 * time.Second) // How long should we wait?
+	for time.Now().Before(deadline) {
+		log.Debugf("XXX Checking version...")
+		version, err := dclient.ServerVersion(context.Background())
+		if err == nil {
+			return version.Version, nil
+		}
+		log.Debugf("XXX failed: %s", err)
+	}
+	return "", fmt.Errorf("Failed to get engine version")
+
+}
+
+// VerifyDockerEngine makes sure the machine has docker installed, and if not
+// will install the docker daemon
+func VerifyDockerEngine(m Machine, localCertDir string) error {
+	log.Debugf("Verifying or installing docker engine on %s", m.GetName())
+
+	resChan := make(chan error)
+
+	go func(m Machine) {
+
+		// First check to see if docker is already installed
+		ver, err := getServerVersion(m)
+		if err != nil {
+			// If the engine's not installed, then they have to specify CMD or URL (fail fast if not specified)
+			if EngineInstallCMD == "" && EngineInstallURL == "" {
+				resChan <- fmt.Errorf("Base disk does not appear to have an engine installed, so you must specify ENGINE_INSTALL_URL or ENGINE_INSTALL_CMD to use it")
+				return
+			}
+
+			// Install the engine
+			out, err := m.MachineSSH("sudo mkdir -p /etc/docker; sudo chown docker /etc/docker")
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to create /etc/docker on %s: %s: %s", m.GetName(), err, out)
+				return
+			}
+			configOption := "standard"
+
+			// Check to see if we have devicemapper set up
+			out, err = m.MachineSSH("sudo vgs docker")
+			if err == nil {
+				log.Debugf("device-mapper detected - status is\n%s", out)
+				configOption = "devicemapper"
+			} else {
+				log.Debugf("device-mapper not detected: %s: %s", err, out)
+
+				// No device mapper, check for ZFS
+				out, err = m.MachineSSH("sudo zfs list -t all")
+				if err == nil {
+					log.Debugf("zfs detected - status is\n%s", out)
+					configOption = "zfs"
+				} else {
+					log.Debugf("zfs not detected: %s: %s", err, out)
+				}
+			}
+
+			data := bytes.NewBufferString(daemonJSON[configOption])
+
+			err = m.WriteFile("/etc/docker/daemon.json", data)
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to write daemon.json to %s: %s", m.GetName(), err)
+				return
+			}
+			for _, file := range []string{"ca.pem", "cert.pem", "key.pem"} {
+				localFile := filepath.Join(localCertDir, file)
+				fp, err := os.Open(localFile)
+				if err != nil {
+					resChan <- fmt.Errorf("Failed to open %s: %s", localFile, err)
+					return
+				}
+				err = m.WriteFile(filepath.Join("/etc/docker", file), fp)
+				if err != nil {
+					resChan <- fmt.Errorf("Failed to write %s to %s", file, m.GetName(), err)
+					return
+				}
+			}
+
+			installCMD := EngineInstallCMD
+			if installCMD == "" {
+				installCMD = fmt.Sprintf("curl -sSL %s | sh", EngineInstallURL)
+			}
+			out, err = m.MachineSSH(installCMD)
+			if err != nil {
+				log.Info(out)
+				resChan <- fmt.Errorf("Failed to install engine on %s: %s", m.GetName(), err)
+				return
+			}
+
+			// XXX Might not be necessary...
+			time.Sleep(500 * time.Millisecond)
+
+			// But we're not done :-(
+			// BLECH!  This'll need some refinement to handle different variants...
+			out, err = m.MachineSSH("systemctl show --property=FragmentPath docker 2>&1 | grep FragmentPath | cut -f2 -d=")
+			if err != nil {
+				resChan <- fmt.Errorf("Couldn't figure out the systemctl config for docker daemon - need to add suport for this distro...: %s: %s", err, out)
+				return
+			}
+			cfgFile := strings.TrimSpace(out)
+
+			out, err = m.MachineSSH(`sudo sed -i -e 's|^ExecStart=\(.*\)$|ExecStart=\1 -H unix:// -H tcp://0.0.0.0:2376|g' ` + cfgFile)
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to update config file: %s: %s", err, out)
+				return
+			}
+			out, err = m.MachineSSH("sudo systemctl daemon-reload")
+			if err != nil {
+				resChan <- fmt.Errorf("Couldn't restart docker daemon...: %s: %s", err, out)
+				return
+			}
+			// Check to see if firewalld is enabled, and if so, punch a hole
+			_, err = m.MachineSSH("systemctl status firewalld")
+			if err == nil {
+				log.Debugf("Detected firewalld, opening port")
+				for _, port := range TCPPortList {
+					out, err = m.MachineSSH(fmt.Sprintf("sudo firewall-cmd --add-port=%d/tcp --permanent", port))
+					if err != nil {
+						log.Warnf("Firewall NOT opened TCP: %d %s %s", port, err, out)
+					}
+				}
+				for _, port := range UDPPortList {
+					out, err = m.MachineSSH(fmt.Sprintf("sudo firewall-cmd --add-port=%d/udp --permanent", port))
+					if err != nil {
+						log.Warnf("Firewall NOT opened UDP: %d %s %s", port, err, out)
+					}
+				}
+				out, err = m.MachineSSH("sudo firewall-cmd --reload")
+				if err != nil {
+					log.Warnf("Firewall NOT restarted: %s %s", err, out)
+				}
+			} else {
+				_, err = m.MachineSSH("sudo SuSEfirewall2 status")
+				if err == nil {
+					log.Debugf("Detected SuSEfirewall2, opening ports")
+					for _, port := range TCPPortList {
+						out, err = m.MachineSSH(fmt.Sprintf("sudo SuSEfirewall2 open EXT TCP %d", port))
+						if err != nil {
+							log.Warnf("Firewall NOT opened for TCP %d: %s %s", port, err, out)
+						}
+					}
+					for _, port := range UDPPortList {
+						out, err = m.MachineSSH(fmt.Sprintf("sudo SuSEfirewall2 open EXT UDP %d", port))
+						if err != nil {
+							log.Warnf("Firewall NOT opened for UDP %d: %s %s", port, err, out)
+						}
+					}
+					out, err = m.MachineSSH("sudo SuSEfirewall2 start")
+					log.Debug("Firewall restarted: %s %s", out, err)
+				}
+			}
+			out, err = m.MachineSSH("sudo systemctl restart docker.service")
+			if err != nil {
+				resChan <- fmt.Errorf("Couldn't restart docker daemon...: %s: %s", err, out)
+				return
+			}
+
+			// End hacky daemon config goop
+
+			// Now wait for the daemon to start responding...
+			for {
+				ver, err = getServerVersion(m)
+				if err == nil {
+					log.Infof("Succesfully installed engine %s on %s", ver, m.GetName())
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		} else {
+			// Make sure to bounce the daemon so it has the right hostname since we likely just set it
+			out, err := m.MachineSSH("sudo systemctl restart docker.service")
+			if err != nil {
+				resChan <- fmt.Errorf("Couldn't restart docker daemon...: %s: %s", err, out)
+				return
+			}
+		}
+		log.Debugf("engine on %s is ready", m.GetName())
+		resChan <- nil
+
+	}(m)
+
+	timer := time.NewTimer(2 * time.Minute) // TODO - make configurable
+	select {
+	case res := <-resChan:
+		return res
+	case <-timer.C:
+		return fmt.Errorf("Unable to verify docker engine on %s within timeout", m.GetName())
+	}
+
+	return nil
+}
