@@ -24,7 +24,7 @@ import (
 
 var (
 	// NamePrefix denotes the machine prefix for the test.
-	NamePrefix = os.Getenv("MACHINE_PREFIX") + "E2ETest"
+	NamePrefix = os.Getenv("MACHINE_PREFIX") + "E2E"
 	// Timeout denotes the timeout on the docker client.
 	Timeout = 180 * time.Second
 	// BusyboxImage denotes the busybox image string.
@@ -50,6 +50,7 @@ type Machine interface {
 	TarHostDir(hostPath string) ([]byte, error)
 	MachineSSH(command string) (string, error)
 	WriteFile(filepath string, data io.Reader) error
+	IsWindows() bool
 }
 
 // GetTestMachines uses docker-machine to create a test engine which can then be used for integration tests (try RetryCount times)
