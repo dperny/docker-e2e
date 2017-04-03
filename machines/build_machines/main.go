@@ -35,7 +35,7 @@ func main() {
 		}
 		// TODO - this is very virsh specific, needs some refactoring...
 		fmt.Printf(`
-To use this machine
+To use this Linux machine
 
 export DOCKER_HOST="tcp://%s:2376"
 export DOCKER_CERT_PATH="%s"
@@ -54,7 +54,7 @@ virsh undefine %s
 			log.Fatalf("Failure: %s", err)
 		}
 		fmt.Printf(`
-To use this machine
+To use this Windows machine
 
 export DOCKER_HOST="tcp://%s:2376"
 export DOCKER_CERT_PATH="%s"

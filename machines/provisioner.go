@@ -13,9 +13,10 @@ import (
 )
 
 var (
-	EngineInstallURL = os.Getenv("ENGINE_INSTALL_URL")
-	EngineInstallCMD = os.Getenv("ENGINE_INSTALL_CMD")
-	TCPPortList      = []int{
+	EngineInstallURL    = os.Getenv("ENGINE_INSTALL_URL")
+	EngineInstallWinURL = os.Getenv("ENGINE_INSTALL_WIN_URL")
+	EngineInstallCMD    = os.Getenv("ENGINE_INSTALL_CMD")
+	TCPPortList         = []int{
 		// Product ports
 		443, 2377, 2376, 4789, 7946, 12382, 12386, 12383, 12379, 12380, 12376, 12381, 12385, 12384, 12387,
 
@@ -64,12 +65,21 @@ var (
     "storage-driver": "zfs"
 }
 `,
+		"windows": `{
+    "debug": true,
+    "tls": true,
+    "tlscacert": "c:\\ProgramData\\docker\\ca.pem",
+    "tlscert": "c:\\ProgramData\\docker\\cert.pem",
+    "tlskey": "c:\\ProgramData\\docker\\key.pem",
+    "tlsverify": true
+}
+`,
 	}
 )
 
 func getServerVersion(m Machine) (string, error) {
 	// During bootup, docker might take a while to start, so check to see if it looks like it's there
-	out, err := m.MachineSSH("sudo docker --version")
+	out, err := m.MachineSSH("docker --version")
 	if err != nil {
 		log.Debugf("Failed to check docker version: %s: %s", err, out)
 		return "", err
@@ -81,12 +91,10 @@ func getServerVersion(m Machine) (string, error) {
 	}
 	deadline := time.Now().Add(20 * time.Second) // How long should we wait?
 	for time.Now().Before(deadline) {
-		log.Debugf("XXX Checking version...")
 		version, err := dclient.ServerVersion(context.Background())
 		if err == nil {
 			return version.Version, nil
 		}
-		log.Debugf("XXX failed: %s", err)
 	}
 	return "", fmt.Errorf("Failed to get engine version")
 
@@ -253,6 +261,139 @@ func VerifyDockerEngine(m Machine, localCertDir string) error {
 			if err != nil {
 				resChan <- fmt.Errorf("Couldn't restart docker daemon...: %s: %s", err, out)
 				return
+			}
+		}
+		log.Debugf("engine on %s is ready", m.GetName())
+		resChan <- nil
+
+	}(m)
+
+	timer := time.NewTimer(2 * time.Minute) // TODO - make configurable
+	select {
+	case res := <-resChan:
+		return res
+	case <-timer.C:
+		return fmt.Errorf("Unable to verify docker engine on %s within timeout", m.GetName())
+	}
+
+	return nil
+}
+
+// VerifyDockerEngineWindows makes sure the machine has docker installed, and if not
+// will install the docker daemon
+func VerifyDockerEngineWindows(m Machine, localCertDir string) error {
+	log.Debugf("Verifying or installing docker engine on windows machine %s", m.GetName())
+
+	resChan := make(chan error, 1)
+
+	go func(m Machine) {
+
+		// First check to see if docker is already installed
+		ver, err := getServerVersion(m)
+		if err != nil {
+			// If the engine's not installed, then they have to specify CMD or URL (fail fast if not specified)
+			if EngineInstallWinURL == "" {
+				resChan <- fmt.Errorf("Base disk does not appear to have an engine installed, so you must specify ENGINE_INSTALL_WIN_URL to use it")
+				return
+			}
+
+			// TODO - why do we sometimes get "lost connection" or just simply hangs for no apparent reason
+			time.Sleep(500 * time.Millisecond)
+
+			out, err := m.MachineSSH(fmt.Sprintf(`powershell Invoke-WebRequest "%s" -UseBasicParsing -OutFile docker.zip`, EngineInstallWinURL))
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to download engine from %s: %s: %s", EngineInstallWinURL, m.GetName(), err, out)
+				return
+			}
+
+			// TODO - why do we sometimes get "lost connection"
+			time.Sleep(500 * time.Millisecond)
+
+			out, err = m.MachineSSH("powershell Expand-Archive docker.zip -DestinationPath $Env:ProgramFiles")
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to extract engine %s: %s", m.GetName(), err, out)
+				return
+			}
+
+			// TODO - why do we sometimes get "lost connection"
+			time.Sleep(500 * time.Millisecond)
+
+			out, err = m.MachineSSH("powershell Remove-Item -Force docker.zip")
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to cleanup zip %s: %s", m.GetName(), err, out)
+				return
+			}
+
+			// TODO - why do we sometimes get "lost connection"
+			time.Sleep(500 * time.Millisecond)
+
+			data := bytes.NewBufferString(daemonJSON["windows"])
+			// Make sure the path exists
+			out, err = m.MachineSSH(`powershell mkdir c:\ProgramData\docker\config`)
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to create config dir %s: %s", m.GetName(), err, out)
+				return
+			}
+
+			err = m.WriteFile(`c:\ProgramData\docker\config\daemon.json`, data)
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to write daemon.json to %s: %s", m.GetName(), err)
+				return
+			}
+			for _, file := range []string{"ca.pem", "cert.pem", "key.pem"} {
+				localFile := filepath.Join(localCertDir, file)
+				fp, err := os.Open(localFile)
+				if err != nil {
+					resChan <- fmt.Errorf("Failed to open %s: %s", localFile, err)
+					return
+				}
+				err = m.WriteFile(fmt.Sprintf(`c:\ProgramData\docker\%s`, file), fp)
+				if err != nil {
+					resChan <- fmt.Errorf("Failed to write %s to %s", file, m.GetName(), err)
+					return
+				}
+			}
+
+			out, err = m.MachineSSH("powershell dockerd.exe -H npipe:////./pipe/docker_engine -H 0.0.0.0:2376 --register-service")
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to setup service %s: %s", m.GetName(), err, out)
+				return
+			}
+
+			// Open up the necessary ports in the firewall
+			log.Debugf("Opening firewall ports")
+			for _, port := range TCPPortList {
+				out, err = m.MachineSSH(fmt.Sprintf(`powershell netsh advfirewall firewall add rule name="%d-TCP" dir=in action=allow protocol=TCP localport=%d`, port, port))
+				if err != nil {
+					log.Warnf("Firewall NOT opened TCP: %d %s %s", port, err, out)
+				}
+			}
+			for _, port := range UDPPortList {
+				out, err = m.MachineSSH(fmt.Sprintf(`powershell netsh advfirewall firewall add rule name="%d-UDP" dir=in action=allow protocol=UDP localport=%d`, port, port))
+				if err != nil {
+					log.Warnf("Firewall NOT opened UDP: %d %s %s", port, err, out)
+				}
+			}
+
+			out, err = m.MachineSSH("powershell set-service docker -startuptype automatic")
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to set service to automatic %s: %s", m.GetName(), err, out)
+				return
+			}
+			out, err = m.MachineSSH("powershell Start-Service docker")
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to start docker service %s: %s", m.GetName(), err, out)
+				return
+			}
+
+			// Now wait for the daemon to start responding...
+			for {
+				ver, err = getServerVersion(m)
+				if err == nil {
+					log.Infof("Succesfully installed engine %s on %s", ver, m.GetName())
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
 			}
 		}
 		log.Debugf("engine on %s is ready", m.GetName())

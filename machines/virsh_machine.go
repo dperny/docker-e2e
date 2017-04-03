@@ -1,6 +1,7 @@
 package machines
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/tls"
@@ -22,6 +23,7 @@ import (
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/client"
+	"github.com/kr/pty"
 )
 
 var (
@@ -44,14 +46,14 @@ const (
     <disk type='file' device='disk'>
       <driver name='qemu' type='qcow2' cache='unsafe' io='threads' />
       <source file='{{.DiskPath}}'/>
-      <target dev='vda' bus='virtio'/>
+      <target dev='vda' bus='{{.DiskType}}'/>
     </disk>
     <graphics type='vnc' autoport='yes' listen='127.0.0.1'>
       <listen type='address' address='127.0.0.1'/>
     </graphics>
     <interface type='network'>
       <source network='default'/>
-      <model type='virtio'/>
+      <model type='{{.NICType}}'/>
     </interface>
   </devices>
 </domain>`
@@ -69,6 +71,9 @@ type VirshMachine struct {
 	DiskPath    string
 	CPUCount    int
 	Memory      int
+	isWindows   bool
+	DiskType    string
+	NICType     string
 }
 
 func init() {
@@ -103,10 +108,6 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 		return nil, nil, fmt.Errorf("To use the vrish driver, you must set VIRSH_DISK_DIR to point to where your base OS disks and ssh key live")
 	}
 
-	if windowsCount != 0 {
-		return nil, nil, fmt.Errorf("Windows not yet supported for virsh")
-	}
-
 	baseOS := filepath.Join(VirshDiskDir, VirshOS+".qcow2")
 
 	if _, err := os.Stat(baseOS); err != nil {
@@ -115,12 +116,13 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 
 	timer := time.NewTimer(60 * time.Minute) // TODO - make configurable
 	errChan := make(chan error)
-	resChan := make(chan []Machine)
+	resChan := make(chan []*VirshMachine)
 
 	go func() {
 		log.Debugf("Attempting %s machine creation for %d nodes", VirshOS, linuxCount)
 		id, _ := rand.Int(rand.Reader, big.NewInt(0xffffff))
-		machines := []*VirshMachine{}
+		linuxMachines := []*VirshMachine{}
+		windowsMachines := []*VirshMachine{}
 		for index := 0; index < linuxCount; index++ {
 			m := &VirshMachine{
 				MachineName: fmt.Sprintf("%s-%X-%d", NamePrefix, id, index),
@@ -129,6 +131,8 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 				Memory:      2048,     // TODO - make configurable
 				sshUser:     "docker", // TODO - make configurable
 				sshKeyPath:  filepath.Join(VirshDiskDir, "id_rsa"),
+				DiskType:    "virtio",
+				NICType:     "virtio",
 			}
 			if err := m.cloneDisk(); err != nil {
 				errChan <- err
@@ -162,16 +166,62 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 				InsecureSkipVerify: true, // We don't verify so we can recyle the same certs regardless of VM IP
 
 			}
-			machines = append(machines, m)
+			linuxMachines = append(linuxMachines, m)
+		}
+		for index := 0; index < windowsCount; index++ {
+			m := &VirshMachine{
+				MachineName: fmt.Sprintf("%s-%X-%d", NamePrefix, id, index),
+				BaseDisk:    baseOS,
+				CPUCount:    1,        // TODO - make configurable
+				Memory:      2048,     // TODO - make configurable
+				sshUser:     "docker", // TODO - make configurable
+				sshKeyPath:  filepath.Join(VirshDiskDir, "id_rsa"),
+				DiskType:    "ide",
+				NICType:     "e1000",
+			}
+			if err := m.cloneDisk(); err != nil {
+				errChan <- err
+				return
+			}
+			if err := m.define(); err != nil {
+				errChan <- err
+				return
+			}
+			if err := m.Start(); err != nil {
+				errChan <- err
+				return
+			}
+			cert, err := tls.LoadX509KeyPair(filepath.Join(VirshDiskDir, "cert.pem"), filepath.Join(VirshDiskDir, "key.pem"))
+			if err != nil {
+				errChan <- err
+				return
+			}
+			caCert, err := ioutil.ReadFile(filepath.Join(VirshDiskDir, "ca.pem"))
+			if err != nil {
+				errChan <- err
+				return
+			}
+			caCertPool := x509.NewCertPool()
+			caCertPool.AppendCertsFromPEM(caCert)
+			m.tlsConfig = &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      caCertPool,
+
+				// NOTE:This is insecure, but the test VMs have a short-lifespan
+				InsecureSkipVerify: true, // We don't verify so we can recyle the same certs regardless of VM IP
+
+			}
+			windowsMachines = append(windowsMachines, m)
 		}
 
 		var wg sync.WaitGroup
 
-		res := []Machine{}
-		machineErrChan := make(chan error, linuxCount)
-		for _, m := range machines {
+		res := []*VirshMachine{}
+		machineErrChan := make(chan error, linuxCount+windowsCount)
+		for _, m := range linuxMachines {
 			wg.Add(1)
 			go func(m *VirshMachine) {
+				var result error
 				// Set the hostname
 				out, err := m.MachineSSH(
 					fmt.Sprintf(`sudo hostname "%s"; sudo sed -e 's/.*/%s/' -i /etc/hostname`,
@@ -179,11 +229,27 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 				if err != nil {
 					log.Warnf("Failed to set hostname to %s: %s: %s", m.GetName(), err, out)
 				}
+				result = VerifyDockerEngine(m, VirshDiskDir)
 
-				res := VerifyDockerEngine(m, VirshDiskDir)
-
+				machineErrChan <- result
 				wg.Done()
-				machineErrChan <- res
+			}(m)
+			res = append(res, m)
+		}
+		for _, m := range windowsMachines {
+			wg.Add(1)
+			go func(m *VirshMachine) {
+				var result error
+				out, err := m.MachineSSH(
+					fmt.Sprintf(`powershell rename-computer -newname "%s" -restart`, m.GetName()))
+				if err != nil {
+					log.Warnf("Failed to set hostname to %s: %s: %s", m.GetName(), err, out)
+				}
+				// Give it a few seconds to reboot before we start hammering on it...
+				time.Sleep(5 * time.Second) // TODO - need a better way to tell if we've finished the reboot
+				result = VerifyDockerEngineWindows(m, VirshDiskDir)
+				machineErrChan <- result
+				wg.Done()
 			}(m)
 			res = append(res, m)
 		}
@@ -194,7 +260,7 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 				log.Debugf("XXX sleeping for 10s to allow you to suspend and poke around")
 				time.Sleep(10 * time.Second)
 				// Detected errors, destroy all the machines we created
-				for _, m := range machines {
+				for _, m := range append(linuxMachines, windowsMachines...) {
 					m.Remove()
 				}
 				errChan <- err
@@ -206,10 +272,17 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 	}()
 	select {
 	case res := <-resChan:
-		log.Debugf("XXX Got %v on resChan", res)
-		return res, nil, nil
+		linuxMachines := []Machine{}
+		windowsMachines := []Machine{}
+		for _, m := range res {
+			if m.IsWindows() {
+				windowsMachines = append(windowsMachines, m)
+			} else {
+				linuxMachines = append(linuxMachines, m)
+			}
+		}
+		return linuxMachines, windowsMachines, nil
 	case err := <-errChan:
-		log.Debugf("XXX Got %v on errChan", err)
 		return nil, nil, err
 	case <-timer.C:
 		return nil, nil, fmt.Errorf("Unable to create %d machines within timeout", linuxCount)
@@ -436,8 +509,16 @@ func (m *VirshMachine) Start() error {
 		// Loop until we can ssh in
 		for {
 			out, err := m.MachineSSH("uptime")
-			if err != nil {
-				//log.Debugf("XXX Failed to ssh to %s: %s", m.GetName(), err)
+			if err != nil && strings.Contains(out, "is not recognized as an internal or external command") {
+				log.Info("Detected windows image booted")
+				// TODO would be nice to give some basic "uptime" info... but that's kinda kludgy in windows...
+				m.isWindows = true
+				break
+			} else if err != nil {
+				//log.Debugf("XXX Failed to ssh to %s: %s: %s", m.GetName(), err, out)
+				time.Sleep(500 * time.Millisecond)
+			} else if strings.TrimSpace(out) == "" {
+				log.Debugf("Got empty output from the other side... trying again...")
 				time.Sleep(500 * time.Millisecond)
 			} else {
 				log.Debugf("%s has been up %s", m.GetName(), out)
@@ -469,6 +550,7 @@ func (m *VirshMachine) GetInternalIP() (string, error) {
 
 // MachineSSH runs an ssh command and returns a string of the combined stdout/stderr output once done
 func (m *VirshMachine) MachineSSH(command string) (string, error) {
+	buf := bytes.Buffer{}
 	args := []string{
 		"ssh", "-q",
 		"-o", "StrictHostKeyChecking=no",
@@ -484,8 +566,29 @@ func (m *VirshMachine) MachineSSH(command string) (string, error) {
 	}
 	log.Debugf("SSH to %s: %v", m.MachineName, args)
 	cmd := exec.Command(args[0], args[1:]...)
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	tty, err := pty.Start(cmd)
+	if err != nil {
+		log.Debugf("Failed to establish tty for ssh command")
+		return "", err
+	}
+	defer tty.Close()
+
+	go func() {
+		scanner := bufio.NewScanner(tty)
+		for scanner.Scan() {
+			buf.WriteString(scanner.Text())
+		}
+	}()
+
+	// TODO - do we need to inject any stdin?
+	/*
+		go func() {
+			io.Copy(tty, os.Stdin)
+		}()
+	*/
+
+	err = cmd.Wait()
+	return strings.TrimSpace(buf.String()), err
 }
 
 // Get the contents of a specific file on the engine
@@ -496,6 +599,11 @@ func (m *VirshMachine) CatHostFile(hostPath string) ([]byte, error) {
 // Get the content of a directory as a tar file from the engine
 func (m *VirshMachine) TarHostDir(hostPath string) ([]byte, error) {
 	return tarHostDir(m, hostPath)
+}
+
+// IsWindows reports if this machines is a windows system - false means linux
+func (m *VirshMachine) IsWindows() bool {
+	return m.isWindows
 }
 
 // Write data from an io.Reader to a file on the machine with 0600 perms.

@@ -325,3 +325,7 @@ func (m *BuildMachine) WriteFile(filePath string, data io.Reader) error {
 	}
 	return nil
 }
+
+func (m *BuildMachine) IsWindows() bool {
+	return false
+}
