@@ -224,8 +224,8 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 				var result error
 				// Set the hostname
 				out, err := m.MachineSSH(
-					fmt.Sprintf(`sudo hostname "%s"; sudo sed -e 's/.*/%s/' -i /etc/hostname`,
-						m.GetName(), m.GetName()))
+					fmt.Sprintf(`sudo hostname "%s"; sudo sed -e 's/.*/%s/' -i /etc/hostname; sudo sed -e 's/127\.0\.1\.1.*/127.0.1.1 %s/' -i /etc/hosts`,
+						m.GetName(), m.GetName(), m.GetName()))
 				if err != nil {
 					log.Warnf("Failed to set hostname to %s: %s: %s", m.GetName(), err, out)
 				}
