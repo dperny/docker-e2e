@@ -42,6 +42,14 @@ func main() {
 		log.Fatalf("Failure: %s: %s", err, out)
 	}
 
+	// Make sure to nuke the key.json file so it'll be regenerated
+	// otherwise older versions of classic swarm freak out due to
+	// duplicate engine IDs
+	out, err = m.MachineSSH("sudo rm /etc/docker/key.json")
+	if err != nil {
+		log.Fatalf("Failure: %s: %s", err, out)
+	}
+
 	baseDisk := m.BaseDisk
 	diskFile := m.DiskPath
 	// Immediately delete it, but preserve the disk, then rename the disk
