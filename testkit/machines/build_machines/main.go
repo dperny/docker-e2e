@@ -6,7 +6,7 @@ import (
 	"strconv"
 
 	log "github.com/Sirupsen/logrus"
-	"github.com/docker/docker-e2e/machines"
+	"github.com/docker/docker-e2e/testkit/machines"
 )
 
 // Simple utility to build one or more test machines

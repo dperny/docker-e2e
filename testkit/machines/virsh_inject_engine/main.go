@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	log "github.com/Sirupsen/logrus"
-	"github.com/docker/docker-e2e/machines"
+	"github.com/docker/docker-e2e/testkit/machines"
 )
 
 // Use this utility to periodically take a base image and create various
