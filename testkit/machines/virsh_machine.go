@@ -568,7 +568,7 @@ func (m *VirshMachine) MachineSSH(command string) (string, error) {
 	cmd := exec.Command(args[0], args[1:]...)
 	tty, err := pty.Start(cmd)
 	if err != nil {
-		log.Debugf("Failed to establish tty for ssh command")
+		log.Debugf("Failed to establish tty for ssh command: %s", err)
 		return "", err
 	}
 	defer tty.Close()

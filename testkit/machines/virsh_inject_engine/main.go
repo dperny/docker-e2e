@@ -18,12 +18,12 @@ import (
 func main() {
 	log.SetLevel(log.DebugLevel)
 
-	machines, _, err := machines.NewVirshMachines(1, 0)
+	linuxMachines, _, err := machines.NewVirshMachines(1, 0)
 
 	if err != nil {
 		log.Fatalf("Failure: %s", err)
 	}
-	m := machines[0].(*machines.VirshMachine)
+	m := linuxMachines[0].(*machines.VirshMachine)
 
 	// Figure out our exact server version
 	dclient, err := m.GetEngineAPI()
