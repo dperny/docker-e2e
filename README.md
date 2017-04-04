@@ -62,3 +62,10 @@ and ssh connection to the remote cluster to debug something, you can do
 endpoint. When you're done with your cluster, you should do 
 `testkit rm somename` to delete it.
 
+
+## Testkit Machines management
+
+The `./testkit/machines` tree contains low-level machine provisioning logic
+that can be used to rapidly spin up test machines.
+
+For more detais, see [./testkit/machines/README.md](./testkit/machines/README.md)
