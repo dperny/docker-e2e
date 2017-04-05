@@ -292,12 +292,12 @@ func (m *BuildMachine) MachineSSH(command string) (string, error) {
 
 // Get the contents of a specific file on the engine
 func (m *BuildMachine) CatHostFile(hostPath string) ([]byte, error) {
-	return catHostFile(m, hostPath)
+	return CatHostFile(m, hostPath)
 }
 
 // Get the content of a directory as a tar file from the engine
 func (m *BuildMachine) TarHostDir(hostPath string) ([]byte, error) {
-	return tarHostDir(m, hostPath)
+	return TarHostDir(m, hostPath)
 }
 
 // Write data from an io.Reader to a file on the machine with 0600 perms.

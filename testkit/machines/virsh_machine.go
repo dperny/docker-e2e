@@ -593,12 +593,12 @@ func (m *VirshMachine) MachineSSH(command string) (string, error) {
 
 // Get the contents of a specific file on the engine
 func (m *VirshMachine) CatHostFile(hostPath string) ([]byte, error) {
-	return catHostFile(m, hostPath)
+	return CatHostFile(m, hostPath)
 }
 
 // Get the content of a directory as a tar file from the engine
 func (m *VirshMachine) TarHostDir(hostPath string) ([]byte, error) {
-	return tarHostDir(m, hostPath)
+	return TarHostDir(m, hostPath)
 }
 
 // IsWindows reports if this machines is a windows system - false means linux
