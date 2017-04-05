@@ -135,7 +135,7 @@ func HostDirManifest(m Machine, hostPath string) (map[string]interface{}, error)
 	cmd := []string{"sh", "-c", "cd /theDir && find . -print"}
 	binds := []string{fmt.Sprintf("%s:/theDir:ro", hostPath)}
 	log.Debug("Running find")
-	data, err := runCommand(m, BusyboxImage, cmd, binds, []string{})
+	data, err := RunCommand(m, BusyboxImage, cmd, binds, []string{})
 	if err != nil {
 		log.Debugf("failed: %s", err)
 		return nil, err
@@ -149,24 +149,24 @@ func HostDirManifest(m Machine, hostPath string) (map[string]interface{}, error)
 }
 
 // Get the contents of a specific file on the engine
-func catHostFile(m Machine, hostPath string) ([]byte, error) {
+func CatHostFile(m Machine, hostPath string) ([]byte, error) {
 	cmd := []string{"cat", "/thefile"}
 	binds := []string{fmt.Sprintf("%s:/thefile:ro", hostPath)}
-	return runCommand(m, BusyboxImage, cmd, binds, []string{})
+	return RunCommand(m, BusyboxImage, cmd, binds, []string{})
 }
 
 // CatHostFileOnVolume Get the contents of a specific file in a volume
 func CatHostFileOnVolume(m Machine, volname, path string) ([]byte, error) {
 	cmd := []string{"cat", "/volume_mount_dir/" + path}
 	binds := []string{fmt.Sprintf("%s:/volume_mount_dir:ro", volname)}
-	return runCommand(m, BusyboxImage, cmd, binds, []string{})
+	return RunCommand(m, BusyboxImage, cmd, binds, []string{})
 }
 
 // GetHostFileUIDOnVolume Get the host file UID in a volume
 func GetHostFileUIDOnVolume(m Machine, volname, path string) (string, error) {
 	cmd := []string{"stat", "-c", "%u", "/volume_mount_dir/" + path}
 	binds := []string{fmt.Sprintf("%s:/volume_mount_dir:ro", volname)}
-	out, err := runCommand(m, BusyboxImage, cmd, binds, []string{})
+	out, err := RunCommand(m, BusyboxImage, cmd, binds, []string{})
 	if err != nil {
 		return "", err
 	}
@@ -174,14 +174,14 @@ func GetHostFileUIDOnVolume(m Machine, volname, path string) (string, error) {
 }
 
 // Get the content of a directory as a tar file from the engine
-func tarHostDir(m Machine, hostPath string) ([]byte, error) {
+func TarHostDir(m Machine, hostPath string) ([]byte, error) {
 	// TODO - Might want to consider compression if we find we're transfering significant data during tests
 	cmd := []string{"tar", "--directory", "/theDir", "-cf", "-", "."}
 	binds := []string{fmt.Sprintf("%s:/theDir:ro", hostPath)}
-	return runCommand(m, BusyboxImage, cmd, binds, []string{})
+	return RunCommand(m, BusyboxImage, cmd, binds, []string{})
 }
 
-func runCommand(m Machine, image string, cmd, binds, entrypoint []string) ([]byte, error) {
+func RunCommand(m Machine, image string, cmd, binds, entrypoint []string) ([]byte, error) {
 	log.Debugf("Running - image:%s entrypoint:%s cmd:%s binds:%s", image, entrypoint, cmd, binds)
 	c, err := m.GetEngineAPI()
 	if err != nil {
