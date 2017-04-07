@@ -7,7 +7,7 @@ test machines.
 
 * docker-machine (KVM, AWS, virtualbox, etc.)
 * native virsh
-* **WIP:** native virtualbox
+* native virtualbox
 * **WIP:** native aws
 
 Generally the native back-ends provide better support for various
@@ -34,12 +34,15 @@ aws s3 sync s3://e2e-images/ /e2e
 ```
 
 
-## Virsh
+## Deploy Machines
 
 Once you have replicated the images, you can deploy one or more machines.
+If your host is linux that supports `virsh`, coninue with the subsection **Virsh**.
+Otherwise, continue with the subsection **Virtual Box** and use VirtualBox CLI.
 
 (replace the XXX's below as applicable for your target OS image and engine version)
 
+### Virsh
 
 ```
 export MACHINE_DRIVER=virsh
@@ -57,4 +60,15 @@ docker run --rm -it --entrypoint build_machines \
     -v /e2e:/e2e \
     -v /var/run/libvirt:/var/run/libvirt \
     dockerswarm/testkit:latest 1 1
+```
+
+### VirtualBox
+
+```
+export ENGINE_INSTALL_CMD=XXX
+export VBOX_DISK_DIR=/e2e
+export VBOX_OS=XXX
+export MACHINE_DRIVER=vbox
+
+go run build_machines/main.go 1 0
 ```
