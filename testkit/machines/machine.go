@@ -70,6 +70,9 @@ func GetTestMachinesWithDockerRootDir(linuxCount int, windowsCount int, dockerRo
 	if os.Getenv("MACHINE_DRIVER") == "virsh" {
 		return NewVirshMachines(linuxCount, windowsCount) // TODO dockerRootDir
 	}
+	if os.Getenv("MACHINE_DRIVER") == "vbox" {
+		return NewVBoxMachines(linuxCount, windowsCount)
+	}
 	return NewBuildMachines(linuxCount, windowsCount, dockerRootDir)
 }
 
