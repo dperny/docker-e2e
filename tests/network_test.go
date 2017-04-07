@@ -32,10 +32,7 @@ func TestNetworkExternalLb(t *testing.T) {
 	assert.NoError(t, err, "Client creation failed")
 
 	replicas := 3
-	spec := CannedServiceSpec(name, uint64(replicas))
-	// use nginx
-	spec.TaskTemplate.ContainerSpec.Image = "dperny/httptest"
-	spec.TaskTemplate.ContainerSpec.Command = nil
+	spec := CannedServiceSpec(cli, name, uint64(replicas))
 	// expose a port
 	spec.EndpointSpec = &swarm.EndpointSpec{
 		Mode: swarm.ResolutionModeVIP,
@@ -118,16 +115,19 @@ func TestNetworkExternalLb(t *testing.T) {
 						// fmt.Printf("error: %v\n", err)
 						return
 					}
-
-					// body text should just be the container id
-					namebytes, err := ioutil.ReadAll(resp.Body)
-					// docs say we have to close the body. defer doing so
 					defer resp.Body.Close()
-					if err != nil {
-						// TODO(dperny) properly handle error
-						return
+					name := resp.Header.Get("Host")
+
+					if name == "" {
+						// body text should just be the container id
+						namebytes, err := ioutil.ReadAll(resp.Body)
+						// docs say we have to close the body. defer doing so
+						if err != nil {
+							// TODO(dperny) properly handle error
+							return
+						}
+						name = strings.TrimSpace(string(namebytes))
 					}
-					name := strings.TrimSpace(string(namebytes))
 					// fmt.Printf("saw %v\n", name)
 
 					// if the container has already been seen, increment its count
