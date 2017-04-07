@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -58,7 +59,7 @@ func truncServiceName(name string) string {
 }
 
 // CannedServiceSpec returns a ready-to-go service spec with name and replicas
-func CannedServiceSpec(name string, replicas uint64, labels ...string) swarm.ServiceSpec {
+func CannedServiceSpec(cli *client.Client, name string, replicas uint64, labels ...string) swarm.ServiceSpec {
 	// first create the canned spec
 	spec := swarm.ServiceSpec{
 		Annotations: swarm.Annotations{
@@ -72,10 +73,19 @@ func CannedServiceSpec(name string, replicas uint64, labels ...string) swarm.Ser
 		},
 		TaskTemplate: swarm.TaskSpec{
 			ContainerSpec: swarm.ContainerSpec{
-				Image: "nginx",
+				Image:   GetSelfImage(cli),
+				Command: []string{"util", "test-server"},
 			},
 		},
 		Mode: swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: &replicas}},
+		EndpointSpec: &swarm.EndpointSpec{
+			Ports: []swarm.PortConfig{
+				{
+					Protocol:   "tcp",
+					TargetPort: 80,
+				},
+			},
+		},
 	}
 
 	// then, add labels
@@ -218,4 +228,27 @@ func GetNodeIps(cli *client.Client) ([]string, error) {
 		ips = append(ips, ip)
 	}
 	return ips, nil
+}
+
+// GetSelfImage returns the image name or ID of the current running environment
+// or the image that the outter rigging expects to use for nested containers
+// If we're unable to determine the image, "dockerswarm/e2e:latest" is returned
+// as a sensible default suitable for running child container scnearios
+func GetSelfImage(cli *client.Client) string {
+	imageName := os.Getenv("TEST_IMAGE_NAME")
+	if imageName == "" {
+		imageName = "dockerswarm/e2e:latest"
+	}
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		return imageName
+	}
+
+	args := filters.NewArgs()
+	args.Add("id", hostname)
+	containers, err := cli.ContainerList(context.TODO(), types.ContainerListOptions{Filters: args})
+	if err == nil && len(containers) > 0 {
+		return containers[0].ImageID
+	}
+	return imageName
 }
