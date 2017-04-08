@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	log "github.com/Sirupsen/logrus"
@@ -49,8 +48,15 @@ type Machine interface {
 	CatHostFile(hostPath string) ([]byte, error)
 	TarHostDir(hostPath string) ([]byte, error)
 	MachineSSH(command string) (string, error)
+	GetConnectionEnv() string
 	WriteFile(filepath string, data io.Reader) error
 	IsWindows() bool
+}
+
+// Environment is a simple wrapper around a set of related machines
+type Environment struct {
+	StackName string
+	Machines  []Machine
 }
 
 // GetTestMachines uses docker-machine to create a test engine which can then be used for integration tests (try RetryCount times)
@@ -62,72 +68,23 @@ func GetTestMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 // returning an array of linux machines, windows machines, and any error
 func GetTestMachinesWithDockerRootDir(linuxCount int, windowsCount int, dockerRootDir string) ([]Machine, []Machine, error) {
 	if os.Getenv("MACHINE_DRIVER") == "virsh" {
-		return NewVirshMachines(linuxCount, windowsCount)
+		return NewVirshMachines(linuxCount, windowsCount) // TODO dockerRootDir
 	}
-	linuxMachines := []Machine{}
-	windowsMachines := []Machine{}
-	var linuxWG sync.WaitGroup
-	var windowsWG sync.WaitGroup
-	fail := false
-	linuxRes := make(chan Machine)
-	windowsRes := make(chan Machine)
-	for i := 0; i < linuxCount; i++ {
-		linuxWG.Add(1)
-		go func(i int) {
-			defer linuxWG.Done()
-			m, err := NewBuildMachine(dockerRootDir)
-			if err != nil {
-				log.Error(err)
-				fail = true
-			}
-			linuxRes <- m
-		}(i)
-	}
-	/* TODO - port windows driver over
-	for i := 0; i < windowsCount; i++ {
-		windowsWG.Add(1)
-		go func(i int) {
-			defer windowsWG.Done()
-			m, err := NewWindowsAWSMachine(dockerRootDir)
-			if err != nil {
-				log.Error(err)
-				fail = true
-			}
-			windowsRes <- m
-		}(i)
-	}
-	*/
+	return NewBuildMachines(linuxCount, windowsCount, dockerRootDir)
+}
 
-	go func() {
-		linuxWG.Wait()
-		close(linuxRes)
-	}()
-	go func() {
-		windowsWG.Wait()
-		close(windowsRes)
-	}()
-	for m := range linuxRes {
-		linuxMachines = append(linuxMachines, m)
+func ListEnvironments() ([]*Environment, error) {
+	if os.Getenv("MACHINE_DRIVER") == "virsh" {
+		return VirshListEnvironments()
 	}
-	for m := range windowsRes {
-		windowsMachines = append(windowsMachines, m)
+	return DockerMachineListEnvironments()
+}
+
+func DestroyEnvironment(name string) error {
+	if os.Getenv("MACHINE_DRIVER") == "virsh" {
+		return VirshDestroyEnvironment(name)
 	}
-	if fail {
-		for _, m := range linuxMachines {
-			if m != nil {
-				m.Remove()
-			}
-			//m.Finished(false) // TODO
-		}
-		for _, m := range windowsMachines {
-			if m != nil {
-				m.Remove()
-			}
-			//m.Finished(false) // TODO
-		}
-		return nil, nil, fmt.Errorf("Failed to create one or more machines")
-	}
-	return linuxMachines, windowsMachines, nil
+	return DockerMachineDestroyEnvironment(name)
 }
 
 // HostDirManifest Return a manifest of the files on the host in the directory (using find $hostpath)
