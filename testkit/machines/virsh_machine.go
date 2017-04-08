@@ -27,8 +27,9 @@ import (
 )
 
 var (
-	VirshDiskDir = "/e2e"        // Default
-	VirshOS      = "ubuntu16.04" // Default
+	VirshDiskDir   = "/e2e"
+	VirshOSLinux   = "ubuntu16.04"
+	VirshOSWindows = "winnanors1"
 )
 
 const (
@@ -77,10 +78,17 @@ type VirshMachine struct {
 }
 
 func init() {
-	VirshDiskDir = os.Getenv("VIRSH_DISK_DIR")
-	baseOS := os.Getenv("VIRSH_OS")
-	if baseOS != "" {
-		VirshOS = baseOS
+	diskDir := os.Getenv("VIRSH_DISK_DIR")
+	if diskDir != "" {
+		VirshDiskDir = diskDir
+	}
+	baseOSLinux := os.Getenv("VIRSH_OS_LINUX")
+	if baseOSLinux != "" {
+		VirshOSLinux = baseOSLinux
+	}
+	baseOSWindows := os.Getenv("VIRSH_OS_WINDOWS")
+	if baseOSWindows != "" {
+		VirshOSWindows = baseOSWindows
 	}
 }
 
@@ -108,10 +116,18 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 		return nil, nil, fmt.Errorf("To use the vrish driver, you must set VIRSH_DISK_DIR to point to where your base OS disks and ssh key live")
 	}
 
-	baseOS := filepath.Join(VirshDiskDir, VirshOS+".qcow2")
+	baseOSLinux := filepath.Join(VirshDiskDir, VirshOSLinux+".qcow2")
+	baseOSWindows := filepath.Join(VirshDiskDir, VirshOSWindows+".qcow2")
 
-	if _, err := os.Stat(baseOS); err != nil {
-		return nil, nil, fmt.Errorf("Unable to locate %s: %s", baseOS, err)
+	if linuxCount > 0 {
+		if _, err := os.Stat(baseOSLinux); err != nil {
+			return nil, nil, fmt.Errorf("Unable to locate %s: %s", baseOSLinux, err)
+		}
+	}
+	if windowsCount > 0 {
+		if _, err := os.Stat(baseOSWindows); err != nil {
+			return nil, nil, fmt.Errorf("Unable to locate %s: %s", baseOSWindows, err)
+		}
 	}
 
 	timer := time.NewTimer(60 * time.Minute) // TODO - make configurable
@@ -119,14 +135,15 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 	resChan := make(chan []*VirshMachine)
 
 	go func() {
-		log.Debugf("Attempting %s machine creation for %d nodes", VirshOS, linuxCount)
+		log.Debugf("Creating %d linux VMs based on %s", linuxCount, VirshOSLinux)
 		id, _ := rand.Int(rand.Reader, big.NewInt(0xffffff))
 		linuxMachines := []*VirshMachine{}
 		windowsMachines := []*VirshMachine{}
-		for index := 0; index < linuxCount; index++ {
+		index := 0
+		for ; index < linuxCount; index++ {
 			m := &VirshMachine{
 				MachineName: fmt.Sprintf("%s-%X-%d", NamePrefix, id, index),
-				BaseDisk:    baseOS,
+				BaseDisk:    baseOSLinux,
 				CPUCount:    1,        // TODO - make configurable
 				Memory:      2048,     // TODO - make configurable
 				sshUser:     "docker", // TODO - make configurable
@@ -168,10 +185,11 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 			}
 			linuxMachines = append(linuxMachines, m)
 		}
-		for index := 0; index < windowsCount; index++ {
+		log.Debugf("Creating %d windows VMs based on %s", windowsCount, VirshOSWindows)
+		for ; index-linuxCount < windowsCount; index++ {
 			m := &VirshMachine{
 				MachineName: fmt.Sprintf("%s-%X-%d", NamePrefix, id, index),
-				BaseDisk:    baseOS,
+				BaseDisk:    baseOSWindows,
 				CPUCount:    1,        // TODO - make configurable
 				Memory:      2048,     // TODO - make configurable
 				sshUser:     "docker", // TODO - make configurable
