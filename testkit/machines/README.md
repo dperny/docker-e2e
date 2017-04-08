@@ -42,9 +42,11 @@ Once you have replicated the images, you can deploy one or more machines.
 
 
 ```
-export VIRSH_OS=XXX
-export ENGINE_INSTALL_CMD=XXX
 export MACHINE_DRIVER=virsh
+export VIRSH_OS_LINUX=XXX
+export VIRSH_OS_WINDOWS=XXX
+export ENGINE_INSTALL_CMD=XXX
+export ENGINE_INSTALL_WIN_URL=XXX
 
 docker run --rm -it --entrypoint build_machines \
     -e VIRSH_DISK_DIR=/e2e \
@@ -54,5 +56,5 @@ docker run --rm -it --entrypoint build_machines \
     -e ENGINE_INSTALL_URL \
     -v /e2e:/e2e \
     -v /var/run/libvirt:/var/run/libvirt \
-    dockerswarm/testkit:latest 1 0
+    dockerswarm/testkit:latest 1 1
 ```
