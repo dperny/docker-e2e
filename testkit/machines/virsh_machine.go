@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -135,7 +136,7 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 	resChan := make(chan []*VirshMachine)
 
 	go func() {
-		log.Debugf("Creating %d linux VMs based on %s", linuxCount, VirshOSLinux)
+		log.Infof("Creating %d linux VMs based on %s", linuxCount, VirshOSLinux)
 		id, _ := rand.Int(rand.Reader, big.NewInt(0xffffff))
 		linuxMachines := []*VirshMachine{}
 		windowsMachines := []*VirshMachine{}
@@ -185,7 +186,7 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 			}
 			linuxMachines = append(linuxMachines, m)
 		}
-		log.Debugf("Creating %d windows VMs based on %s", windowsCount, VirshOSWindows)
+		log.Infof("Creating %d windows VMs based on %s", windowsCount, VirshOSWindows)
 		for ; index-linuxCount < windowsCount; index++ {
 			m := &VirshMachine{
 				MachineName: fmt.Sprintf("%s-%X-%d", NamePrefix, id, index),
@@ -305,6 +306,94 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 	case <-timer.C:
 		return nil, nil, fmt.Errorf("Unable to create %d machines within timeout", linuxCount)
 	}
+}
+
+func VirshListEnvironments() ([]*Environment, error) {
+	envs := []*Environment{}
+	// Pattern match the machines to filer out noise, and group them
+	re := regexp.MustCompile(fmt.Sprintf(`(%s-[0-9A-F]+)-([0-9]+)`, NamePrefix))
+	for _, line := range getActiveMachines() {
+		match := re.FindStringSubmatch(line)
+		if match != nil {
+			envName := match[1]
+			m := &VirshMachine{MachineName: match[0]}
+			err := m.gatherMachineDetails()
+			if err != nil {
+				return nil, err
+			}
+			found := false
+			for _, env := range envs {
+				if env.StackName == envName {
+					found = true
+					env.Machines = append(env.Machines, m)
+				}
+			}
+			if !found {
+				envs = append(envs, &Environment{envName, []Machine{m}})
+			}
+		}
+	}
+	return envs, nil
+}
+
+func (m *VirshMachine) gatherMachineDetails() error {
+	m.GetIP()
+	// TODO - consider taking the plunge and parsing all the gory XML...
+	cmd := exec.Command("virsh", "vcpucount", m.MachineName, "--current")
+	data, err := cmd.CombinedOutput()
+	out := strings.TrimSpace(string(data))
+	if err != nil {
+		log.Warnf("Failed to gather CPU count %s: %s: %s", m.MachineName, err, out)
+	} else {
+		m.CPUCount, err = strconv.Atoi(out)
+	}
+
+	cmd = exec.Command("virsh", "domblklist", m.MachineName)
+	data, err = cmd.CombinedOutput()
+	if err != nil {
+		log.Warnf("Failed to gather disk info %s: %s: %s", m.MachineName, err, out)
+	} else {
+		// Bleck!
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		re := regexp.MustCompile(`\S+\s+(\S+)`)
+		if len(lines) > 2 {
+			match := re.FindStringSubmatch(lines[2]) // Skip the two lines of header
+			if match != nil {
+				// Assume the ssh key is right next to the disk
+				m.sshKeyPath = filepath.Join(path.Dir(match[1]), "id_rsa")
+			}
+
+		}
+	}
+	m.sshUser = "docker"
+	return nil
+}
+
+func VirshDestroyEnvironment(name string) error {
+	re := regexp.MustCompile(fmt.Sprintf(`%s-[0-9]+`, name))
+	for _, line := range getActiveMachines() {
+		match := re.FindStringSubmatch(line)
+		if match != nil {
+			diskPath := filepath.Join(VirshDiskDir, line+".qcow2") // XXX Potentially fragile
+			cmd := exec.Command("virsh", "destroy", line)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				log.Warn(string(out))
+			}
+			cmd = exec.Command("virsh", "undefine", "--storage", diskPath, line)
+			out, err = cmd.CombinedOutput()
+			if err != nil {
+				log.Error(string(out))
+				return err
+			}
+
+			// If the disk still exists, nuke it, but ignore errors
+			os.Remove(diskPath)
+
+			log.Infof("Machine %s deleted", line)
+		}
+	}
+	return nil
 }
 
 func (m *VirshMachine) cloneDisk() error {
@@ -497,38 +586,17 @@ func (m *VirshMachine) Start() error {
 		return err
 	}
 	resChan := make(chan error)
-	ipRegex := regexp.MustCompile(`ipv4\s+([^/]+)`)
 	// wait for it to power on (by checking virsh -q domifaddr m.GetName())
 	go func(m *VirshMachine) {
 		log.Debugf("Waiting for IP to appear for %s", m.GetName())
-		for {
-			cmd := exec.Command("virsh", "-q", "domifaddr", m.GetName())
-			data, err := cmd.CombinedOutput()
-			out := strings.TrimSpace(string(data))
-			if err == nil {
-				lines := strings.Split(string(out), "\n")
-
-				if len(lines) > 0 {
-					matches := ipRegex.FindStringSubmatch(lines[0])
-					if len(matches) > 0 {
-						ip := matches[1]
-						m.ip = ip
-						m.internalip = ip
-						m.dockerHost = fmt.Sprintf("tcp://%s:2376", ip)
-						// TODO validate the IP looks good
-						break
-					}
-				}
-			}
-			time.Sleep(1 * time.Second)
-		}
+		m.GetIP()
 		log.Debugf("Machine %s has IP %s", m.GetName(), m.ip)
 
 		// Loop until we can ssh in
 		for {
 			out, err := m.MachineSSH("uptime")
 			if err != nil && strings.Contains(out, "is not recognized as an internal or external command") {
-				log.Info("Detected windows image booted")
+				log.Debug("Detected windows image booted")
 				// TODO would be nice to give some basic "uptime" info... but that's kinda kludgy in windows...
 				m.isWindows = true
 				break
@@ -558,6 +626,28 @@ func (m *VirshMachine) Start() error {
 
 // Return the public IP of the machine
 func (m *VirshMachine) GetIP() (string, error) {
+	for m.ip == "" { // TODO timeout if this hangs indefinitely...
+		ipRegex := regexp.MustCompile(`ipv4\s+([^/]+)`)
+		cmd := exec.Command("virsh", "-q", "domifaddr", m.GetName())
+		data, err := cmd.CombinedOutput()
+		out := strings.TrimSpace(string(data))
+		if err == nil {
+			lines := strings.Split(string(out), "\n")
+
+			if len(lines) > 0 {
+				matches := ipRegex.FindStringSubmatch(lines[0])
+				if len(matches) > 0 {
+					ip := matches[1]
+					m.ip = ip
+					m.internalip = ip
+					m.dockerHost = fmt.Sprintf("tcp://%s:2376", ip)
+					// TODO validate the IP looks good
+					break
+				}
+			}
+		}
+		time.Sleep(1 * time.Second)
+	}
 	return m.ip, nil
 }
 
@@ -660,4 +750,15 @@ func (m *VirshMachine) writeLocalFile(localFilePath, remoteFilePath string) erro
 		return err
 	}
 	return nil
+}
+
+func (m *VirshMachine) GetConnectionEnv() string {
+	return strings.Join([]string{
+		fmt.Sprintf(`export DOCKER_HOST="tcp://%s:2376"`, m.ip),
+		fmt.Sprintf(`export DOCKER_CERT_PATH="%s"`, VirshDiskDir),
+		fmt.Sprintf("# %s", m.MachineName),
+		fmt.Sprintf("# ssh -i %s %s@%s", m.sshKeyPath, m.sshUser, m.ip),
+		// TODO - once virsh generates valid SANs on derived certs add this
+		// "export DOCKER_TLS_VERIFY=1",
+	}, "\n")
 }

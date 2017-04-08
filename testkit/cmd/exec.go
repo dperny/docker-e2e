@@ -24,7 +24,7 @@ func runCommands(c *environment.Environment, cfg *Config) error {
 
 var execCmd = &cobra.Command{
 	Use:   "exec <config> <environment>",
-	Short: "Execute tests in an already provisioned environment",
+	Short: "NOT YET PORTED - Execute tests in an already provisioned environment",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) != 2 {
 			return errors.New("Config or AWS Stack ID missing")

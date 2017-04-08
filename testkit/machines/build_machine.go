@@ -12,7 +12,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/Sirupsen/logrus"
@@ -24,6 +27,7 @@ import (
 type BuildMachine struct {
 	name       string
 	dockerHost string
+	certPath   string
 	tlsConfig  *tls.Config
 	sshKeyPath string
 	sshUser    string
@@ -42,22 +46,114 @@ type DockerMachineInspect struct {
 }
 
 // Generate a new machine using docker-machine CLI
-func NewBuildMachine(dockerRootDir string) (Machine, error) {
-	// Some cloud providers can be a little flaky, so try a few times before we give up
-	verbose := false
-	for i := 0; i < RetryCount; i++ {
-		machine, err := buildMachineOnce(dockerRootDir, verbose)
-		if err == nil {
-			return machine, err
-		}
-		log.Infof("Failed to create machine, retrying: %s", err)
-		verbose = true // Crank up logging if something went wrong
-		// TODO - Might want to try to explicitly remove here if subsequent attempts fail with conflicts...
+func NewBuildMachines(linuxCount, windowsCount int, dockerRootDir string) ([]Machine, []Machine, error) {
+	if windowsCount > 0 {
+		return nil, nil, fmt.Errorf("The docker-machine based back-end does not support windows machines")
 	}
-	return nil, fmt.Errorf("Failed to create machine after %d tries", RetryCount)
+
+	id, _ := rand.Int(rand.Reader, big.NewInt(0xffffff))
+	linuxMachines := []Machine{}
+	var linuxWG sync.WaitGroup
+	fail := false
+	linuxRes := make(chan Machine)
+	for i := 0; i < linuxCount; i++ {
+		linuxWG.Add(1)
+		go func(index int) {
+			defer linuxWG.Done()
+			// Some cloud providers can be a little flaky, so try a few times before we give up
+			verbose := false
+			for r := 0; r < RetryCount; r++ {
+				m, err := buildMachineOnce(fmt.Sprintf("%s-%X-%d", NamePrefix, id, index), dockerRootDir, verbose)
+				if err == nil {
+					linuxRes <- m
+					return
+				}
+				log.Infof("Failed to create machine, retrying: %s", err)
+				verbose = true // Crank up logging if something went wrong
+				// TODO - Might want to try to explicitly remove here if subsequent attempts fail with conflicts...
+			}
+			fail = true
+			log.Errorf("Failed to create machine after %d tries", RetryCount)
+		}(i)
+	}
+
+	go func() {
+		linuxWG.Wait()
+		close(linuxRes)
+	}()
+	for m := range linuxRes {
+		linuxMachines = append(linuxMachines, m)
+	}
+	if fail {
+		for _, m := range linuxMachines {
+			if m != nil {
+				m.Remove()
+			}
+		}
+		return nil, nil, fmt.Errorf("Failed to create one or more machines")
+	}
+	return linuxMachines, nil, nil
 }
 
-func buildMachineOnce(dockerRootDir string, verbose bool) (Machine, error) {
+func DockerMachineListEnvironments() ([]*Environment, error) {
+	cmd := exec.Command("docker-machine", "ls", "-q")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Error(string(out))
+		return nil, err
+	}
+	envs := []*Environment{}
+	// Pattern match the machines to filer out noise, and group them
+	re := regexp.MustCompile(fmt.Sprintf(`(%s-[0-9A-F]+)-([0-9]+)`, NamePrefix))
+	for _, line := range strings.Split(string(out), "\n") {
+		match := re.FindStringSubmatch(line)
+		if match != nil {
+			envName := match[1]
+			m := &BuildMachine{name: match[0]}
+			err := m.gatherMachineDetails()
+			if err != nil {
+				return nil, err
+			}
+			found := false
+			for _, env := range envs {
+				if env.StackName == envName {
+					found = true
+					env.Machines = append(env.Machines, m)
+				}
+			}
+			if !found {
+				envs = append(envs, &Environment{envName, []Machine{m}})
+			}
+		}
+	}
+	return envs, nil
+}
+
+func DockerMachineDestroyEnvironment(name string) error {
+	cmd := exec.Command("docker-machine", "ls", "-q")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Error(string(out))
+		return err
+	}
+	re := regexp.MustCompile(fmt.Sprintf(`%s-[0-9]+`, name))
+	for _, line := range strings.Split(string(out), "\n") {
+		match := re.FindStringSubmatch(line)
+		if match != nil {
+			cmd = exec.Command("docker-machine", "rm", "-f", line)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				log.Error(string(out))
+				// TODO Should we try force?
+				return err
+			}
+			log.Infof("Machine %s deleted", line)
+		}
+	}
+	return nil
+}
+
+func buildMachineOnce(name string, dockerRootDir string, verbose bool) (Machine, error) {
 	machineDriver := os.Getenv("MACHINE_DRIVER")
 	if machineDriver == "" {
 		return nil, fmt.Errorf(`You forgot to "export MACHINE_DRIVER=virtualbox" (or your favorite driver)`)
@@ -86,9 +182,8 @@ func buildMachineOnce(dockerRootDir string, verbose bool) (Machine, error) {
 		args = append(args, "--engine-opt", fmt.Sprintf("graph=%s", dockerRootDir))
 	}
 
-	id, _ := rand.Int(rand.Reader, big.NewInt(0xffffff))
 	m := &BuildMachine{
-		name: fmt.Sprintf("%s-%X", NamePrefix, id),
+		name: name,
 	}
 
 	args = append(args, m.name)
@@ -104,29 +199,19 @@ func buildMachineOnce(dockerRootDir string, verbose bool) (Machine, error) {
 		return nil, err
 	}
 	log.Infof("Created new test VM: %s", m.name)
-
-	cmd = exec.Command("docker-machine", "inspect", m.name)
-	out, err = cmd.CombinedOutput()
+	err = m.gatherMachineDetails()
 	if err != nil {
-		log.Error(err)
-		log.Error(string(out))
+		// If something went wrong, make sure to clean up after ourselves
 		_ = m.Remove()
 		return nil, err
 	}
-	machineInfo := DockerMachineInspect{}
-	if err := json.Unmarshal([]byte(out), &machineInfo); err != nil {
-		log.Error(err)
-		_ = m.Remove()
-		return nil, err
-	}
-
 	fixupCommand := os.Getenv("MACHINE_FIXUP_COMMAND")
 	if fixupCommand != "" {
 		log.Infof("Fixing test VM by running: %s %s", m.name, fixupCommand)
 
 		// Can't use `docker-machine ssh` because it doesn't allocate a tty
 		// which is needed for sudo.
-		cmd = exec.Command("ssh", "-tt", "-l", machineInfo.Driver.SSHUser, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-i", machineInfo.Driver.SSHKeyPath, machineInfo.Driver.IPAddress, fixupCommand)
+		cmd = exec.Command("ssh", "-tt", "-l", m.sshUser, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-i", m.sshKeyPath, m.ip, fixupCommand)
 		out, err = cmd.CombinedOutput()
 		if err != nil {
 			log.Error(err)
@@ -136,6 +221,27 @@ func buildMachineOnce(dockerRootDir string, verbose bool) (Machine, error) {
 			return nil, err
 		}
 	}
+	log.Infof("%s internal IP: %s", m.name, m.internalip)
+
+	log.Infof("Host: %s", m.dockerHost)
+	return m, nil
+}
+
+func (m *BuildMachine) gatherMachineDetails() error {
+	cmd := exec.Command("docker-machine", "inspect", m.name)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Error(err)
+		log.Error(string(out))
+		return err
+	}
+	machineInfo := DockerMachineInspect{}
+	if err := json.Unmarshal([]byte(out), &machineInfo); err != nil {
+		log.Error(err)
+		return err
+	}
+	m.sshUser = machineInfo.Driver.SSHUser
+	m.sshKeyPath = machineInfo.Driver.SSHKeyPath
 
 	// Now get the env settings for this new VM
 	cmd = exec.Command("docker-machine", "env", m.name)
@@ -143,9 +249,7 @@ func buildMachineOnce(dockerRootDir string, verbose bool) (Machine, error) {
 	if err != nil {
 		log.Error(err)
 		log.Error(string(out))
-		// If something went wrong, make sure to clean up after ourselves
-		_ = m.Remove()
-		return nil, err
+		return err
 	} else {
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.Contains(line, "export DOCKER_HOST=") {
@@ -154,21 +258,18 @@ func buildMachineOnce(dockerRootDir string, verbose bool) (Machine, error) {
 			} else if strings.Contains(line, "export DOCKER_CERT_PATH=") {
 				vals := strings.Split(line, "=")
 				certDir := strings.Trim(vals[1], `"`)
-				log.Infof("Loading certs from %s", certDir)
+				m.certPath = certDir
+				log.Debugf("Loading certs from %s", certDir)
 				cert, err := tls.LoadX509KeyPair(
 					fmt.Sprintf("%s/cert.pem", certDir),
 					fmt.Sprintf("%s/key.pem", certDir))
 				if err != nil {
-					// If something went wrong, make sure to clean up after ourselves
-					_ = m.Remove()
-					return nil, err
+					return err
 				}
 				caCert, err := ioutil.ReadFile(
 					fmt.Sprintf("%s/ca.pem", certDir))
 				if err != nil {
-					// If something went wrong, make sure to clean up after ourselves
-					_ = m.Remove()
-					return nil, err
+					return err
 				}
 				caCertPool := x509.NewCertPool()
 				caCertPool.AppendCertsFromPEM(caCert)
@@ -185,10 +286,10 @@ func buildMachineOnce(dockerRootDir string, verbose bool) (Machine, error) {
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		log.Error(string(out))
-		return nil, err
+		return err
 	}
 	m.ip = strings.TrimSpace(string(out))
-	log.Infof("%s external IP: %s", m.name, m.ip)
+	log.Debugf("%s external IP: %s", m.name, m.ip)
 
 	if os.Getenv("MACHINE_DRIVER") == "virtualbox" {
 		log.Info("Detected virtualbox - working around broken internal IP address limitations.")
@@ -198,14 +299,14 @@ func buildMachineOnce(dockerRootDir string, verbose bool) (Machine, error) {
 		out, err = cmd.CombinedOutput()
 		if err != nil {
 			log.Error(string(out))
-			return nil, err
+			return err
 		}
 		m.internalip = strings.TrimSpace(string(out))
 	}
-	log.Infof("%s internal IP: %s", m.name, m.internalip)
-
-	log.Infof("Host: %s", m.dockerHost)
-	return m, nil
+	if m.sshKeyPath == "" {
+		m.sshKeyPath = filepath.Join(m.certPath, "id_rsa")
+	}
+	return nil
 }
 
 func (m *BuildMachine) GetName() string {
@@ -328,4 +429,14 @@ func (m *BuildMachine) WriteFile(filePath string, data io.Reader) error {
 
 func (m *BuildMachine) IsWindows() bool {
 	return false
+}
+
+func (m *BuildMachine) GetConnectionEnv() string {
+	return strings.Join([]string{
+		fmt.Sprintf(`export DOCKER_HOST="tcp://%s:2376"`, m.ip),
+		fmt.Sprintf(`export DOCKER_CERT_PATH="%s"`, m.certPath),
+		"export DOCKER_TLS_VERIFY=1",
+		fmt.Sprintf("# %s", m.name),
+		fmt.Sprintf("# ssh -i %s %s@%s", m.sshKeyPath, m.sshUser, m.ip),
+	}, "\n")
 }

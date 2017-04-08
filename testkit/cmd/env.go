@@ -3,7 +3,6 @@ package cmd
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -11,12 +10,12 @@ import (
 	"github.com/docker/docker-e2e/testkit/machines"
 )
 
-var sshCmd = &cobra.Command{
-	Use:   "ssh <machine> <cmds...>",
-	Short: "Get the SSH invocation for an environment or machine",
+var envCmd = &cobra.Command{
+	Use:   "env <machine>",
+	Short: "emit an env block suitable for eval",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
-			return errors.New("Environment or machine missing")
+			return errors.New("Environment machine")
 		}
 		debug, err := cmd.Flags().GetBool("debug")
 		if err != nil {
@@ -49,9 +48,8 @@ var sshCmd = &cobra.Command{
 			}
 		}
 		if m != nil {
-			out, err := m.MachineSSH(strings.Join(args[1:], " "))
-			fmt.Print(out)
-			return err
+			fmt.Println(m.GetConnectionEnv())
+			return nil
 		}
 		return fmt.Errorf("unable to find matching stack or machine")
 
@@ -59,5 +57,5 @@ var sshCmd = &cobra.Command{
 }
 
 func init() {
-	sshCmd.Flags().BoolP("debug", "d", false, "enable verbose logging")
+	envCmd.Flags().BoolP("debug", "d", false, "enable verbose logging")
 }

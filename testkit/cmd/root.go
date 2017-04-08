@@ -51,8 +51,7 @@ var mainCmd = &cobra.Command{
 
 func init() {
 	mainCmd.AddCommand(
-		attachCmd,
-		purgeCmd,
+		envCmd,
 		createCmd,
 		execCmd,
 		runCmd,

@@ -12,7 +12,7 @@ import (
 
 var runCmd = &cobra.Command{
 	Use:   "run <cfg>",
-	Short: "Provision a test environment and run tests",
+	Short: "NOT YET PORTED - Provision a test environment and run tests",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return errors.New("Config missing")

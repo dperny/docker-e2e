@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/docker/docker-e2e/testkit/environment"
+	"github.com/docker/docker-e2e/testkit/machines"
 	"github.com/spf13/cobra"
 )
 
@@ -16,9 +16,7 @@ var removeCmd = &cobra.Command{
 		if len(args) == 0 {
 			return errors.New("Environment name missing")
 		}
-		env := environment.New(args[0], newSession())
-
-		if err := env.Destroy(); err != nil {
+		if err := machines.DestroyEnvironment(args[0]); err != nil {
 			return err
 		}
 		fmt.Printf("%v\n", args[0])
