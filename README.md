@@ -21,47 +21,67 @@ To facilitate running tests on real clusters, the `testkit` tool has been
 created. `testkit` contains some simple commands for spinning up and managing
 clusters as well as running tests. 
 
-## Development Workflow
+## Using testkit
 
-Before you start working, make sure you have a development cluster ready to go.
-You can provision a cluster in the environment of your choice, or you can use
-testkit to have one provisioned on AWS for you.
-
-If you're using `testkit`, you can do `testkit create --name somename <cfg>` 
-with a config file to provision an environment on AWS. You can choose not to 
-pass name, but if you do your cluster will have gooblydegock for a name.
-
-Then, you can get started developing your tests. There isn't a hard and fast
-framework for building tests; just write code that expresses what you need to 
-do to adequately express your test case. Testing is relatively black-box, so 
-you should restrain yourself to only using the official docker go client.
-
-When you're ready to try out your tests, you should set up a forwarded socket 
-to connect your local docker client to the cluster you provisioned earlier. You
-can do this by doing `testkit attach somename`. This will open `docker.sock` in
-the local directory. 
-
-Next, open another terminal and `export DOCKER_HOST=unix://$(pwd)/docker.sock` 
-to tell your docker client to connect to this socket. This socket is forwarded 
-over SSH to the docker socket on the remote cluster. Do `docker info` to make 
-sure you've connected your docker client to the remote cluster.
-
-If you are not using testkit, you can set this socket up manually, or you can 
-simply ssh into the machine and copy over your working code. 
-
-Finally, you're ready to build and run the tests. Do: 
+### Setup AWS credentials
 
 ```
+$ brew install awscli  # or equivalent
+$ aws configure
+```
+
+### Build or install testkit
+
+```
+$ go get github.com/docker/docker-e2e/testkit
+```
+
+### Define an environment
+
+Use https://github.com/docker/docker-e2e/blob/master/testkit/e2e.yml as an example.
+
+Make sure to set `ssh_keyname` to a valid AWS SSH key (and save the private key in `~/.ssh`)
+
+### Run the tests
+
+You can use testkit in a few different ways:
+
+- `testkit create --name foo myenv.yml` will create the environment, and that's it
+- `testkit exec myenv.yml foo` will execute the test commands defined in the configuration in a given environment
+- `testkit run --name foo myenv.yml` will do both a *create* and *exec*
+
+### Manage Environments
+
+In order to manage those environments, *testkit* provides a few commands
+such as `testkit ls` and `testkit rm`.
+
+`testkit` can also *purge* old test environments (to avoid leaking):
+```
+$ testkit purge --ttl=1h
+```
+
+### Development
+
+*testkit* provides a few helpers for development.
+
+You can directly ssh into a test environment by running `testkit ssh`.
+
+`testkit attach` creates a local Docker socket and proxies the call to the remote environment:
+```
+testkit create --name foo e2e.yml
+testkit attach foo
+export DOCKER_HOST=unix//$(pwd)/docker.sock docker info
+```
+
+### Running test locally
+
+```
+$ testkit create --name myenv e2e.yml
+$ testkit attach myenv
+[do some test changes]
 $ docker build -t e2e .
 $ docker run --net=host -v /var/run/docker.sock:/var/run/docker.sock e2e
 ```
-
-This first builds and then runs the tests on the remote cluster. If you need
-and ssh connection to the remote cluster to debug something, you can do 
-`testkit ssh somename` to get an IP address that you can use as an SSH 
-endpoint. When you're done with your cluster, you should do 
-`testkit rm somename` to delete it.
-
 
 ## Testkit Machines management
 
