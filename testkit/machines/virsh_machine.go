@@ -116,6 +116,10 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 	if VirshDiskDir == "" {
 		return nil, nil, fmt.Errorf("To use the vrish driver, you must set VIRSH_DISK_DIR to point to where your base OS disks and ssh key live")
 	}
+	err := VerifyCA(VirshDiskDir)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	baseOSLinux := filepath.Join(VirshDiskDir, VirshOSLinux+".qcow2")
 	baseOSWindows := filepath.Join(VirshDiskDir, VirshOSWindows+".qcow2")
@@ -138,7 +142,7 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 		sshKeyPath = ""
 	}
 
-	timer := time.NewTimer(60 * time.Minute) // TODO - make configurable
+	timer := time.NewTimer(5 * time.Minute) // TODO - make configurable
 	errChan := make(chan error)
 	resChan := make(chan []*VirshMachine)
 
@@ -769,6 +773,7 @@ func (m *VirshMachine) GetConnectionEnv() string {
 	return strings.Join([]string{
 		fmt.Sprintf(`export DOCKER_HOST="tcp://%s:2376"`, m.ip),
 		fmt.Sprintf(`export DOCKER_CERT_PATH="%s"`, VirshDiskDir),
+		"export DOCKER_TLS_VERIFY=1",
 		fmt.Sprintf("# %s", m.MachineName),
 		fmt.Sprintf("# ssh -i %s %s@%s", m.sshKeyPath, m.sshUser, m.ip),
 		// TODO - once virsh generates valid SANs on derived certs add this
