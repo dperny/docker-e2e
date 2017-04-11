@@ -131,6 +131,13 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 		}
 	}
 
+	// Check for existence of an ssh key, and skip if not found
+	sshKeyPath := filepath.Join(VirshDiskDir, "id_rsa")
+	if _, err := os.Stat(sshKeyPath); err != nil {
+		log.Debugf("No ssh key found, assuming password-less login. (%s)", sshKeyPath)
+		sshKeyPath = ""
+	}
+
 	timer := time.NewTimer(60 * time.Minute) // TODO - make configurable
 	errChan := make(chan error)
 	resChan := make(chan []*VirshMachine)
@@ -148,7 +155,7 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 				CPUCount:    1,        // TODO - make configurable
 				Memory:      2048,     // TODO - make configurable
 				sshUser:     "docker", // TODO - make configurable
-				sshKeyPath:  filepath.Join(VirshDiskDir, "id_rsa"),
+				sshKeyPath:  sshKeyPath,
 				DiskType:    "virtio",
 				NICType:     "virtio",
 			}
@@ -668,10 +675,11 @@ func (m *VirshMachine) MachineSSH(command string) (string, error) {
 		"-o", "CheckHostIP=no",
 		"-o", "ConnectTimeout=8",
 		"-o", "VerifyHostKeyDNS=no",
-		"-i", m.sshKeyPath,
-		m.sshUser + "@" + m.ip,
-		command,
 	}
+	if m.sshKeyPath != "" {
+		args = append(args, "-i", m.sshKeyPath)
+	}
+	args = append(args, m.sshUser+"@"+m.ip, command)
 	log.Debugf("SSH to %s: %v", m.MachineName, args)
 	cmd := exec.Command(args[0], args[1:]...)
 	tty, err := pty.Start(cmd)
@@ -731,15 +739,20 @@ func (m *VirshMachine) WriteFile(filePath string, data io.Reader) error {
 }
 
 func (m *VirshMachine) writeLocalFile(localFilePath, remoteFilePath string) error {
-	cmd := exec.Command("scp", "-i", m.sshKeyPath, "-q",
+	args := []string{
+		"scp", "-q",
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "GlobalKnownHostsFile=/dev/null",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "UpdateHostKeys=no",
 		"-o", "CheckHostIP=no",
 		"-o", "VerifyHostKeyDNS=no",
-		localFilePath,
-		fmt.Sprintf("%s@%s:%s", m.sshUser, m.ip, remoteFilePath))
+	}
+	if m.sshKeyPath != "" {
+		args = append(args, "-i", m.sshKeyPath)
+	}
+	args = append(args, localFilePath, fmt.Sprintf("%s@%s:%s", m.sshUser, m.ip, remoteFilePath))
+	cmd := exec.Command(args[0], args[1:]...)
 	data, err := cmd.CombinedOutput()
 	out := strings.TrimSpace(string(data))
 	if out != "" {
