@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -20,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"net"
+
 	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/client"
 	"github.com/kr/pty"
@@ -33,7 +36,9 @@ var (
 		"ubuntu16.04": "Ubuntu_64",
 		"centos7.0":   "RedHat_64",
 	}
-	vbm = "VBoxManage"
+	VBoxOSWindows     = "winnanors1"
+	VBoxOSTypeWindows = "WindowsNT_64"
+	vbm               = "VBoxManage"
 )
 
 type VBoxMachine struct {
@@ -55,13 +60,17 @@ type VBoxMachine struct {
 
 func init() {
 	VBoxDiskDir = os.Getenv("VBOX_DISK_DIR")
-	baseOS := os.Getenv("VBOX_OS_LINUX")
-	if baseOS != "" {
-		if _, ok := VBoxOSTypeLinuxDict[baseOS]; ok {
-			VBoxOSLinux = baseOS
+	baseOSLinux := os.Getenv("VBOX_OS_LINUX")
+	if baseOSLinux != "" {
+		if _, ok := VBoxOSTypeLinuxDict[baseOSLinux]; ok {
+			VBoxOSLinux = baseOSLinux
 		} else {
-			log.Warnf("Unsupported VBOX_OS %s, using default %s", baseOS, VBoxOSLinux)
+			log.Warnf("Unsupported VBOX_OS %s, using default %s", baseOSLinux, VBoxOSLinux)
 		}
+	}
+	baseOSWindows := os.Getenv("VBOX_OS_WINDOWS")
+	if baseOSWindows != "" {
+		VBoxOSWindows = baseOSWindows
 	}
 }
 
@@ -84,17 +93,23 @@ func getVBoxActiveMachines() []string {
 }
 
 func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error) {
-	if windowsCount != 0 {
-		return nil, nil, fmt.Errorf("VBox windows machine is not supported at this time")
-	}
+
 	if VBoxDiskDir == "" {
 		return nil, nil, fmt.Errorf("To use the vbox driver, you must set VBOX_DISK_DIR to point to where your base OS disks and ssh key live")
 	}
 
-	baseOS := filepath.Join(VBoxDiskDir, VBoxOSLinux+".vdi")
+	baseOSLinux := filepath.Join(VBoxDiskDir, VBoxOSLinux+".vdi")
+	baseOSWindows := filepath.Join(VBoxDiskDir, VBoxOSWindows+".vdi")
 
-	if _, err := os.Stat(baseOS); err != nil {
-		return nil, nil, fmt.Errorf("Unable to locate %s: %s", baseOS, err)
+	if linuxCount > 0 {
+		if _, err := os.Stat(baseOSLinux); err != nil {
+			return nil, nil, fmt.Errorf("Unable to locate %s: %s", baseOSLinux, err)
+		}
+	}
+	if windowsCount > 0 {
+		if _, err := os.Stat(baseOSWindows); err != nil {
+			return nil, nil, fmt.Errorf("Unable to locate %s: %s", baseOSWindows, err)
+		}
 	}
 
 	timer := time.NewTimer(60 * time.Minute) // TODO - make configurable
@@ -105,11 +120,13 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 		log.Debugf("Attempting %s machine creation for %d nodes", VBoxOSLinux, linuxCount)
 		id, _ := rand.Int(rand.Reader, big.NewInt(0xffffff))
 		linuxMachines := []*VBoxMachine{}
+		windowsMachines := []*VBoxMachine{}
 
-		for index := 0; index < linuxCount; index++ {
+		index := 0
+		for ; index < linuxCount; index++ {
 			m := &VBoxMachine{
 				MachineName: fmt.Sprintf("%s-%X-%d", NamePrefix, id, index),
-				BaseDisk:    baseOS,
+				BaseDisk:    baseOSLinux,
 				CPUCount:    1,        // TODO - make configurable
 				Memory:      2048,     // TODO - make configurable
 				sshUser:     "docker", // TODO - make configurable
@@ -152,10 +169,57 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 			linuxMachines = append(linuxMachines, m)
 		}
 
+		log.Debugf("Creating %d windows VMs based on %s", windowsCount, VBoxOSWindows)
+		for ; index-linuxCount < windowsCount; index++ {
+			m := &VBoxMachine{
+				MachineName: fmt.Sprintf("%s-%X-%d", NamePrefix, id, index),
+				BaseDisk:    baseOSWindows,
+				CPUCount:    1,        // TODO - make configurable
+				Memory:      2048,     // TODO - make configurable
+				sshUser:     "docker", // TODO - make configurable
+				sshKeyPath:  filepath.Join(VBoxDiskDir, "id_rsa"),
+				DiskType:    "ide",
+				NICType:     "82540EM",
+			}
+			if err := m.cloneDisk(); err != nil {
+				errChan <- err
+				return
+			}
+			if err := m.defineWindows(); err != nil {
+				errChan <- err
+				return
+			}
+			if err := m.Start(); err != nil {
+				errChan <- err
+				return
+			}
+			cert, err := tls.LoadX509KeyPair(filepath.Join(VBoxDiskDir, "cert.pem"), filepath.Join(VBoxDiskDir, "key.pem"))
+			if err != nil {
+				errChan <- err
+				return
+			}
+			caCert, err := ioutil.ReadFile(filepath.Join(VBoxDiskDir, "ca.pem"))
+			if err != nil {
+				errChan <- err
+				return
+			}
+			caCertPool := x509.NewCertPool()
+			caCertPool.AppendCertsFromPEM(caCert)
+			m.tlsConfig = &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      caCertPool,
+
+				// NOTE:This is insecure, but the test VMs have a short-lifespan
+				InsecureSkipVerify: true, // We don't verify so we can recyle the same certs regardless of VM IP
+
+			}
+			windowsMachines = append(windowsMachines, m)
+		}
+
 		var wg sync.WaitGroup
 
 		res := []*VBoxMachine{}
-		machineErrChan := make(chan error, linuxCount)
+		machineErrChan := make(chan error, linuxCount+windowsCount)
 		for _, m := range linuxMachines {
 			wg.Add(1)
 			go func(m *VBoxMachine) {
@@ -170,6 +234,23 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 
 				result = VerifyDockerEngine(m, VBoxDiskDir)
 
+				machineErrChan <- result
+				wg.Done()
+			}(m)
+			res = append(res, m)
+		}
+		for _, m := range windowsMachines {
+			wg.Add(1)
+			go func(m *VBoxMachine) {
+				var result error
+				out, err := m.MachineSSH(
+					fmt.Sprintf(`powershell rename-computer -newname "%s" -restart`, m.GetName()))
+				if err != nil {
+					log.Warnf("Failed to set hostname to %s: %s: %s", m.GetName(), err, out)
+				}
+				// Give it a few seconds to reboot before we start hammering on it...
+				time.Sleep(5 * time.Second) // TODO - need a better way to tell if we've finished the reboot
+				result = VerifyDockerEngineWindows(m, VBoxDiskDir)
 				machineErrChan <- result
 				wg.Done()
 			}(m)
@@ -195,8 +276,13 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 	select {
 	case res := <-resChan:
 		linuxMachines := []Machine{}
+		windowsMachines := []Machine{}
 		for _, m := range res {
-			linuxMachines = append(linuxMachines, m)
+			if m.IsWindows() {
+				windowsMachines = append(windowsMachines, m)
+			} else {
+				linuxMachines = append(linuxMachines, m)
+			}
 		}
 		return linuxMachines, nil, nil
 	case err := <-errChan:
@@ -264,6 +350,74 @@ func (m *VBoxMachine) define() error {
 	out = strings.TrimSpace(string(data))
 	if err != nil {
 		return fmt.Errorf("Failed to attach vm storage %s: %s: %s: %s", m.MachineName, m.DiskPath, err, out)
+	}
+
+	log.Debug("Setting network")
+
+	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--nic1", "nat", "--nictype1", m.NICType, "--cableconnected1", "on")
+	data, err = cmd.CombinedOutput()
+	out = strings.TrimSpace(string(data))
+	if err != nil {
+		return fmt.Errorf("Failed to set up network (nat) %s: %s: %s", m.MachineName, err, out)
+	}
+
+	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--nic2", "hostonly", "--nictype2", m.NICType, "--hostonlyadapter2", "vboxnet0", "--cableconnected2", "on")
+	data, err = cmd.CombinedOutput()
+	out = strings.TrimSpace(string(data))
+	if err != nil {
+		return fmt.Errorf("Failed to set up network (hostonly) %s: %s: %s", m.MachineName, err, out)
+	}
+
+	log.Debugf("Creating vm %s successful, ready to start", m.MachineName)
+	return nil
+}
+
+func (m *VBoxMachine) defineWindows() error {
+	log.Debugf("Creating vm %s", m.MachineName)
+
+	cmd := exec.Command(vbm, "createvm", "--name", m.MachineName, "--register")
+	data, err := cmd.CombinedOutput()
+	out := strings.TrimSpace(string(data))
+	if err != nil {
+		return fmt.Errorf("Failed to createvm %s: %s: %s", m.MachineName, err, out)
+	}
+
+	log.Debugf("Setting OS type to %s", VBoxOSTypeWindows)
+	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--ostype", VBoxOSTypeWindows)
+	data, err = cmd.CombinedOutput()
+	out = strings.TrimSpace(string(data))
+	if err != nil {
+		return fmt.Errorf("Failed to change vm ostype %s: %s: %s: %s", m.MachineName, VBoxOSTypeWindows, err, out)
+	}
+
+	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--memory", strconv.Itoa(m.Memory))
+	data, err = cmd.CombinedOutput()
+	out = strings.TrimSpace(string(data))
+	if err != nil {
+		return fmt.Errorf("Failed to change vm memory %s: %s: %s:", m.MachineName, err, out)
+	}
+
+	diskName := "IDE"
+	cmd = exec.Command(vbm, "storagectl", m.MachineName, "--name", diskName, "--add", m.DiskType, "--controller", "PIIX4", "--bootable", "on")
+	data, err = cmd.CombinedOutput()
+	out = strings.TrimSpace(string(data))
+	if err != nil {
+		return fmt.Errorf("Failed to add vm storage ctl %s: %s: %s", m.MachineName, err, out)
+	}
+
+	log.Debugf("Attaching storage at %s", m.DiskPath)
+	cmd = exec.Command(vbm, "storageattach", m.MachineName, "--storagectl", diskName, "--port", "0", "--device", "0", "--type", "hdd", "--medium", m.DiskPath)
+	data, err = cmd.CombinedOutput()
+	out = strings.TrimSpace(string(data))
+	if err != nil {
+		return fmt.Errorf("Failed to attach vm storage %s: %s: %s: %s", m.MachineName, m.DiskPath, err, out)
+	}
+
+	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--ioapic", "on")
+	data, err = cmd.CombinedOutput()
+	out = strings.TrimSpace(string(data))
+	if err != nil {
+		return fmt.Errorf("Failed to turn on ioapic %s: %s: %s", m.MachineName, err, out)
 	}
 
 	log.Debug("Setting network")
@@ -435,26 +589,38 @@ func (m *VBoxMachine) Start() error {
 
 	resChan := make(chan error)
 
+	ips, err := generateIPs()
+	if err != nil {
+		return err
+	}
+
+	macAddress, err := getMACAddress(m.GetName())
+
+	if err != nil {
+		return err
+	}
+	log.Debugf("MAC address for %s is %s", m.GetName(), macAddress)
+
 	go func(m *VBoxMachine) {
+
 		log.Debugf("Waiting for IP to appear for %s", m.GetName())
 		for {
-			cmd := exec.Command(vbm, "guestproperty", "get", m.GetName(), "/VirtualBox/GuestInfo/Net/1/V4/IP")
-			data, err := cmd.CombinedOutput()
-			out := strings.TrimSpace(string(data))
-			if err == nil {
-				s := strings.SplitN(out, ": ", 2)
-
-				if len(s) == 2 {
-
-					ip := s[1]
-					m.ip = ip
-					m.internalip = ip
-					m.dockerHost = fmt.Sprintf("tcp://%s:2376", ip)
-					// TODO validate the IP looks good
-					break
-
+			// Dial to all the IPs that is configured in vboxnet0.
+			for _, ip := range ips {
+				conn, err := net.DialTimeout("tcp", ip+":22", time.Duration(1)*time.Millisecond)
+				if err == nil {
+					conn.Close()
 				}
 			}
+
+			ip, err := findIPFromMAC(macAddress)
+			if err == nil {
+				m.ip = ip
+				m.internalip = ip
+				m.dockerHost = fmt.Sprintf("tcp://%s:2376", ip)
+				break
+			}
+
 			time.Sleep(1 * time.Second)
 		}
 		log.Debugf("Machine %s has IP %s", m.GetName(), m.ip)
@@ -462,7 +628,12 @@ func (m *VBoxMachine) Start() error {
 		// Loop until we can ssh in
 		for {
 			out, err := m.MachineSSH("uptime")
-			if err != nil {
+			if err != nil && strings.Contains(out, "is not recognized as an internal or external command") {
+				log.Info("Detected windows image booted")
+				// TODO would be nice to give some basic "uptime" info... but that's kinda kludgy in windows...
+				m.isWindows = true
+				break
+			} else if err != nil {
 				//log.Debugf("XXX Failed to ssh to %s: %s: %s", m.GetName(), err, out)
 				time.Sleep(500 * time.Millisecond)
 			} else if strings.TrimSpace(out) == "" {
@@ -590,4 +761,102 @@ func (m *VBoxMachine) writeLocalFile(localFilePath, remoteFilePath string) error
 		return err
 	}
 	return nil
+}
+
+func getMACAddress(vmname string) (string, error) {
+	cmd := exec.Command("VBoxManage", "showvminfo", vmname, "--machinereadable")
+	data, err := cmd.CombinedOutput()
+	out := strings.TrimSpace(string(data))
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(out, "\n")
+	m := make(map[string]string)
+	for _, line := range lines {
+		w := strings.Split(line, "=")
+		m[w[0]] = w[1]
+	}
+
+	for i := 1; i <= 8; i++ {
+		if m["nic"+strconv.Itoa(i)] == `"hostonly"` && m["hostonlyadapter"+strconv.Itoa(i)] == `"vboxnet0"` {
+			s := m["macaddress"+strconv.Itoa(i)]
+			if len(s) != 14 {
+				return "", fmt.Errorf("invalid mac address %s", s)
+			}
+			// Converts the MAC address in the format of 080027F44E3F to 8:0:27:f4:4e:3f
+			b := []string{s[1:3], s[3:5], s[5:7], s[7:9], s[9:11], s[11:13]}
+			for i := range b {
+				b[i] = strings.ToLower(b[i])
+				if b[i][0:1] == "0" {
+					b[i] = b[i][1:2]
+				}
+
+			}
+			return strings.Join(b, ":"), nil
+		}
+	}
+	return "", errors.New("unable to find mac address")
+
+}
+func generateIPs() ([]string, error) {
+	cmd := exec.Command("VBoxManage", "list", "dhcpservers")
+	data, err := cmd.CombinedOutput()
+	out := strings.TrimSpace(string(data))
+	if err != nil {
+		return nil, err
+	}
+
+	blocks := strings.Split(out, "\n\n")
+	dhcpServers := make([]map[string]string, len(blocks))
+	for i, block := range blocks {
+		lines := strings.Split(block, "\n")
+		dhcpServers[i] = make(map[string]string)
+		for _, line := range lines {
+			w := strings.Split(line, ":")
+			key := strings.TrimSpace(w[0])
+			value := strings.TrimSpace(w[1])
+			dhcpServers[i][key] = value
+		}
+	}
+	for _, server := range dhcpServers {
+		if server["NetworkName"] == "HostInterfaceNetworking-vboxnet0" {
+			lower := server["lowerIPAddress"]
+			upper := server["upperIPAddress"]
+			networkMask := server["NetworkMask"]
+			// TODO: support other masks.
+			if networkMask != "255.255.255.0" {
+				return nil, fmt.Errorf("unsupported network mask %s", networkMask)
+			}
+			lowerIP := net.ParseIP(lower).To4()
+			upperIP := net.ParseIP(upper).To4()
+
+			ips := []string{lowerIP.String()}
+			ip := lowerIP
+			for !ip.Equal(upperIP) {
+				ip[3]++
+				ips = append(ips, ip.String())
+			}
+			return ips, nil
+
+		}
+	}
+	return nil, errors.New("cannot find hostonly network vboxnet0")
+}
+
+func findIPFromMAC(macAddress string) (string, error) {
+	cmd := exec.Command("arp", "-a")
+	data, err := cmd.CombinedOutput()
+	out := strings.TrimSpace(string(data))
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, macAddress) {
+			left := strings.Index(line, "(")
+			right := strings.Index(line, ")")
+			return line[left+1 : right], nil
+		}
+	}
+	return "", fmt.Errorf("cannot find ip from mac address %s", macAddress)
 }
