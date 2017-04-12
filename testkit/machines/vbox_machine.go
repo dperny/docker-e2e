@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -29,13 +28,9 @@ import (
 )
 
 var (
-	VBoxDiskDir         string        // TODO Default path? (shouldn't be in the orca tree!)
-	VBoxOSLinux         = "centos7.0" // default
-	VBoxOSTypeLinuxDict = map[string]string{
-		"rhel7.3":     "RedHat_64",
-		"ubuntu16.04": "Ubuntu_64",
-		"centos7.0":   "RedHat_64",
-	}
+	VBoxDiskDir       string        // TODO Default path? (shouldn't be in the orca tree!)
+	VBoxOSLinux       = "centos7.0" // default
+	VBoxOSTypeLinux   = "Linux_64"
 	VBoxOSWindows     = "winnanors1"
 	VBoxOSTypeWindows = "WindowsNT_64"
 	vbm               = "VBoxManage"
@@ -56,17 +51,15 @@ type VBoxMachine struct {
 	isWindows   bool
 	DiskType    string
 	NICType     string
+	OSType      string
+	DiskCtrl    string
 }
 
 func init() {
 	VBoxDiskDir = os.Getenv("VBOX_DISK_DIR")
 	baseOSLinux := os.Getenv("VBOX_OS_LINUX")
 	if baseOSLinux != "" {
-		if _, ok := VBoxOSTypeLinuxDict[baseOSLinux]; ok {
-			VBoxOSLinux = baseOSLinux
-		} else {
-			log.Warnf("Unsupported VBOX_OS %s, using default %s", baseOSLinux, VBoxOSLinux)
-		}
+		VBoxOSLinux = baseOSLinux
 	}
 	baseOSWindows := os.Getenv("VBOX_OS_WINDOWS")
 	if baseOSWindows != "" {
@@ -98,8 +91,8 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 		return nil, nil, fmt.Errorf("To use the vbox driver, you must set VBOX_DISK_DIR to point to where your base OS disks and ssh key live")
 	}
 
-	baseOSLinux := filepath.Join(VBoxDiskDir, VBoxOSLinux+".vdi")
-	baseOSWindows := filepath.Join(VBoxDiskDir, VBoxOSWindows+".vdi")
+	baseOSLinux := filepath.Join(VBoxDiskDir, VBoxOSLinux+".qcow2")
+	baseOSWindows := filepath.Join(VBoxDiskDir, VBoxOSWindows+".qcow2")
 
 	if linuxCount > 0 {
 		if _, err := os.Stat(baseOSLinux); err != nil {
@@ -133,8 +126,10 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 				sshKeyPath:  filepath.Join(VBoxDiskDir, "id_rsa"),
 				DiskType:    "sata",
 				NICType:     "virtio",
+				DiskCtrl:    "IntelAHCI",
+				OSType:      VBoxOSTypeLinux,
 			}
-			if err := m.cloneDisk(); err != nil {
+			if err := m.convertDisk(); err != nil {
 				errChan <- err
 				return
 			}
@@ -180,12 +175,14 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 				sshKeyPath:  filepath.Join(VBoxDiskDir, "id_rsa"),
 				DiskType:    "ide",
 				NICType:     "82540EM",
+				DiskCtrl:    "PIIX4",
+				OSType:      VBoxOSTypeWindows,
 			}
-			if err := m.cloneDisk(); err != nil {
+			if err := m.convertDisk(); err != nil {
 				errChan <- err
 				return
 			}
-			if err := m.defineWindows(); err != nil {
+			if err := m.define(); err != nil {
 				errChan <- err
 				return
 			}
@@ -292,22 +289,22 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 	}
 }
 
-func (m *VBoxMachine) cloneDisk() error {
+func (m *VBoxMachine) convertDisk() error {
 	dir := path.Dir(m.BaseDisk)
-	linkedCloneName := filepath.Join(dir, m.MachineName+".vdi")
-	if _, err := os.Stat(linkedCloneName); err == nil {
-		return fmt.Errorf("Linked clone %s of base disk %s already exists!", linkedCloneName, m.BaseDisk)
+	convertedName := filepath.Join(dir, m.MachineName+".vdi")
+	if _, err := os.Stat(convertedName); err == nil {
+		return fmt.Errorf("Image %s of base disk %s already exists!", convertedName, m.BaseDisk)
 	}
-	log.Debugf("Creating linked clone %s with base disk %s", linkedCloneName, m.BaseDisk)
-	cmd := exec.Command(vbm, "clonemedium", m.BaseDisk, linkedCloneName)
+	log.Debugf("Creating %s with base disk %s", convertedName, m.BaseDisk)
+	cmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "vdi", m.BaseDisk, convertedName)
 
 	data, err := cmd.CombinedOutput()
 	out := strings.TrimSpace(string(data))
 	if err != nil {
-		return fmt.Errorf("Failed to create linked clone %s on %s: %s: %s", linkedCloneName, m.BaseDisk, out, err)
+		return fmt.Errorf("Failed to convert image %s on %s: %s: %s", convertedName, m.BaseDisk, out, err)
 	}
 	log.Debug(out)
-	m.DiskPath = linkedCloneName
+	m.DiskPath = convertedName
 	return nil
 }
 
@@ -321,12 +318,12 @@ func (m *VBoxMachine) define() error {
 		return fmt.Errorf("Failed to createvm %s: %s: %s", m.MachineName, err, out)
 	}
 
-	log.Debugf("Setting OS type to %s", VBoxOSTypeLinuxDict[VBoxOSLinux])
-	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--ostype", VBoxOSTypeLinuxDict[VBoxOSLinux])
+	log.Debugf("Setting OS type to %s", m.OSType)
+	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--ostype", m.OSType)
 	data, err = cmd.CombinedOutput()
 	out = strings.TrimSpace(string(data))
 	if err != nil {
-		return fmt.Errorf("Failed to change vm ostype %s: %s: %s: %s", m.MachineName, VBoxOSTypeLinuxDict[VBoxOSLinux], err, out)
+		return fmt.Errorf("Failed to change vm ostype %s: %s: %s: %s", m.MachineName, m.OSType, err, out)
 	}
 
 	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--memory", strconv.Itoa(m.Memory))
@@ -336,8 +333,8 @@ func (m *VBoxMachine) define() error {
 		return fmt.Errorf("Failed to change vm memory %s: %s: %s:", m.MachineName, err, out)
 	}
 
-	diskName := "SATA"
-	cmd = exec.Command(vbm, "storagectl", m.MachineName, "--name", diskName, "--add", m.DiskType, "--controller", "IntelAHCI", "--bootable", "on")
+	diskName := strings.ToUpper(m.DiskType)
+	cmd = exec.Command(vbm, "storagectl", m.MachineName, "--name", diskName, "--add", m.DiskType, "--controller", m.DiskCtrl, "--bootable", "on")
 	data, err = cmd.CombinedOutput()
 	out = strings.TrimSpace(string(data))
 	if err != nil {
@@ -352,72 +349,14 @@ func (m *VBoxMachine) define() error {
 		return fmt.Errorf("Failed to attach vm storage %s: %s: %s: %s", m.MachineName, m.DiskPath, err, out)
 	}
 
-	log.Debug("Setting network")
+	if m.OSType == VBoxOSTypeWindows {
 
-	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--nic1", "nat", "--nictype1", m.NICType, "--cableconnected1", "on")
-	data, err = cmd.CombinedOutput()
-	out = strings.TrimSpace(string(data))
-	if err != nil {
-		return fmt.Errorf("Failed to set up network (nat) %s: %s: %s", m.MachineName, err, out)
-	}
-
-	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--nic2", "hostonly", "--nictype2", m.NICType, "--hostonlyadapter2", "vboxnet0", "--cableconnected2", "on")
-	data, err = cmd.CombinedOutput()
-	out = strings.TrimSpace(string(data))
-	if err != nil {
-		return fmt.Errorf("Failed to set up network (hostonly) %s: %s: %s", m.MachineName, err, out)
-	}
-
-	log.Debugf("Creating vm %s successful, ready to start", m.MachineName)
-	return nil
-}
-
-func (m *VBoxMachine) defineWindows() error {
-	log.Debugf("Creating vm %s", m.MachineName)
-
-	cmd := exec.Command(vbm, "createvm", "--name", m.MachineName, "--register")
-	data, err := cmd.CombinedOutput()
-	out := strings.TrimSpace(string(data))
-	if err != nil {
-		return fmt.Errorf("Failed to createvm %s: %s: %s", m.MachineName, err, out)
-	}
-
-	log.Debugf("Setting OS type to %s", VBoxOSTypeWindows)
-	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--ostype", VBoxOSTypeWindows)
-	data, err = cmd.CombinedOutput()
-	out = strings.TrimSpace(string(data))
-	if err != nil {
-		return fmt.Errorf("Failed to change vm ostype %s: %s: %s: %s", m.MachineName, VBoxOSTypeWindows, err, out)
-	}
-
-	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--memory", strconv.Itoa(m.Memory))
-	data, err = cmd.CombinedOutput()
-	out = strings.TrimSpace(string(data))
-	if err != nil {
-		return fmt.Errorf("Failed to change vm memory %s: %s: %s:", m.MachineName, err, out)
-	}
-
-	diskName := "IDE"
-	cmd = exec.Command(vbm, "storagectl", m.MachineName, "--name", diskName, "--add", m.DiskType, "--controller", "PIIX4", "--bootable", "on")
-	data, err = cmd.CombinedOutput()
-	out = strings.TrimSpace(string(data))
-	if err != nil {
-		return fmt.Errorf("Failed to add vm storage ctl %s: %s: %s", m.MachineName, err, out)
-	}
-
-	log.Debugf("Attaching storage at %s", m.DiskPath)
-	cmd = exec.Command(vbm, "storageattach", m.MachineName, "--storagectl", diskName, "--port", "0", "--device", "0", "--type", "hdd", "--medium", m.DiskPath)
-	data, err = cmd.CombinedOutput()
-	out = strings.TrimSpace(string(data))
-	if err != nil {
-		return fmt.Errorf("Failed to attach vm storage %s: %s: %s: %s", m.MachineName, m.DiskPath, err, out)
-	}
-
-	cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--ioapic", "on")
-	data, err = cmd.CombinedOutput()
-	out = strings.TrimSpace(string(data))
-	if err != nil {
-		return fmt.Errorf("Failed to turn on ioapic %s: %s: %s", m.MachineName, err, out)
+		cmd = exec.Command(vbm, "modifyvm", m.MachineName, "--ioapic", "on")
+		data, err = cmd.CombinedOutput()
+		out = strings.TrimSpace(string(data))
+		if err != nil {
+			return fmt.Errorf("Failed to turn on ioapic %s: %s: %s", m.MachineName, err, out)
+		}
 	}
 
 	log.Debug("Setting network")
@@ -573,7 +512,7 @@ func (m *VBoxMachine) Kill() error {
 		log.Debugf("Got %v on resChan", res)
 		return res
 	case <-timer.C:
-		return fmt.Errorf("Unable to verify docker engine on %s within timeout", m.MachineName)
+		return fmt.Errorf("Unable to kill docker engine on %s within timeout", m.MachineName)
 	}
 }
 
@@ -763,100 +702,13 @@ func (m *VBoxMachine) writeLocalFile(localFilePath, remoteFilePath string) error
 	return nil
 }
 
-func getMACAddress(vmname string) (string, error) {
-	cmd := exec.Command("VBoxManage", "showvminfo", vmname, "--machinereadable")
-	data, err := cmd.CombinedOutput()
-	out := strings.TrimSpace(string(data))
-	if err != nil {
-		return "", err
-	}
-	lines := strings.Split(out, "\n")
-	m := make(map[string]string)
-	for _, line := range lines {
-		w := strings.Split(line, "=")
-		m[w[0]] = w[1]
-	}
-
-	for i := 1; i <= 8; i++ {
-		if m["nic"+strconv.Itoa(i)] == `"hostonly"` && m["hostonlyadapter"+strconv.Itoa(i)] == `"vboxnet0"` {
-			s := m["macaddress"+strconv.Itoa(i)]
-			if len(s) != 14 {
-				return "", fmt.Errorf("invalid mac address %s", s)
-			}
-			// Converts the MAC address in the format of 080027F44E3F to 8:0:27:f4:4e:3f
-			b := []string{s[1:3], s[3:5], s[5:7], s[7:9], s[9:11], s[11:13]}
-			for i := range b {
-				b[i] = strings.ToLower(b[i])
-				if b[i][0:1] == "0" {
-					b[i] = b[i][1:2]
-				}
-
-			}
-			return strings.Join(b, ":"), nil
-		}
-	}
-	return "", errors.New("unable to find mac address")
-
-}
-func generateIPs() ([]string, error) {
-	cmd := exec.Command("VBoxManage", "list", "dhcpservers")
-	data, err := cmd.CombinedOutput()
-	out := strings.TrimSpace(string(data))
-	if err != nil {
-		return nil, err
-	}
-
-	blocks := strings.Split(out, "\n\n")
-	dhcpServers := make([]map[string]string, len(blocks))
-	for i, block := range blocks {
-		lines := strings.Split(block, "\n")
-		dhcpServers[i] = make(map[string]string)
-		for _, line := range lines {
-			w := strings.Split(line, ":")
-			key := strings.TrimSpace(w[0])
-			value := strings.TrimSpace(w[1])
-			dhcpServers[i][key] = value
-		}
-	}
-	for _, server := range dhcpServers {
-		if server["NetworkName"] == "HostInterfaceNetworking-vboxnet0" {
-			lower := server["lowerIPAddress"]
-			upper := server["upperIPAddress"]
-			networkMask := server["NetworkMask"]
-			// TODO: support other masks.
-			if networkMask != "255.255.255.0" {
-				return nil, fmt.Errorf("unsupported network mask %s", networkMask)
-			}
-			lowerIP := net.ParseIP(lower).To4()
-			upperIP := net.ParseIP(upper).To4()
-
-			ips := []string{lowerIP.String()}
-			ip := lowerIP
-			for !ip.Equal(upperIP) {
-				ip[3]++
-				ips = append(ips, ip.String())
-			}
-			return ips, nil
-
-		}
-	}
-	return nil, errors.New("cannot find hostonly network vboxnet0")
-}
-
-func findIPFromMAC(macAddress string) (string, error) {
-	cmd := exec.Command("arp", "-a")
-	data, err := cmd.CombinedOutput()
-	out := strings.TrimSpace(string(data))
-	if err != nil {
-		return "", err
-	}
-	lines := strings.Split(out, "\n")
-	for _, line := range lines {
-		if strings.Contains(line, macAddress) {
-			left := strings.Index(line, "(")
-			right := strings.Index(line, ")")
-			return line[left+1 : right], nil
-		}
-	}
-	return "", fmt.Errorf("cannot find ip from mac address %s", macAddress)
+func (m *VBoxMachine) GetConnectionEnv() string {
+	return strings.Join([]string{
+		fmt.Sprintf(`export DOCKER_HOST="tcp://%s:2376"`, m.ip),
+		fmt.Sprintf(`export DOCKER_CERT_PATH="%s"`, VBoxDiskDir),
+		fmt.Sprintf("# %s", m.MachineName),
+		fmt.Sprintf("# ssh -i %s %s@%s", m.sshKeyPath, m.sshUser, m.ip),
+		// TODO - once virsh generates valid SANs on derived certs add this
+		// "export DOCKER_TLS_VERIFY=1",
+	}, "\n")
 }
