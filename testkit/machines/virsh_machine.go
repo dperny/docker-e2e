@@ -584,7 +584,7 @@ func (m *VirshMachine) Kill() error {
 		log.Debugf("Got %v on resChan", res)
 		return res
 	case <-timer.C:
-		return fmt.Errorf("Unable to verify docker engine on %s within timeout", m.MachineName)
+		return fmt.Errorf("Unable to kill docker engine on %s within timeout", m.MachineName)
 	}
 }
 

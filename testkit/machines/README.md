@@ -63,12 +63,15 @@ docker run --rm -it --entrypoint build_machines \
 ```
 
 ### VirtualBox
+Use `brew install qemu` to install `qemu-img` on MacOS.
 
 ```
-export ENGINE_INSTALL_CMD=XXX
-export VBOX_DISK_DIR=/e2e
-export VBOX_OS=XXX
 export MACHINE_DRIVER=vbox
+export ENGINE_INSTALL_CMD=XXX
+export ENGINE_INSTALL_WIN_URL=XXX
+export VBOX_DISK_DIR=/e2e
+export VBOX_OS_LINUX=XXX
+export VBOX_OS_WINDOWS=XXX
 
-go run build_machines/main.go 1 0
+go run build_machines/main.go 1 1
 ```
