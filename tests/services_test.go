@@ -56,7 +56,7 @@ func TestServicesCreate(t *testing.T) {
 	// up. In addition, CannedServiceSpec mangles the name and adds the uuid
 	// label that we rely on to isolate this particular instance of the tests
 	// from any other instance that may be running
-	serviceSpec := CannedServiceSpec(name, 3)
+	serviceSpec := CannedServiceSpec(cli, name, 3)
 
 	// Now, do an API call. Pass testContext, which will take care of the
 	// timeout for us.
@@ -113,7 +113,7 @@ func TestServicesScale(t *testing.T) {
 	assert.NoError(t, err, "could not create client")
 
 	// create a new service
-	serviceSpec := CannedServiceSpec(name, 1)
+	serviceSpec := CannedServiceSpec(cli, name, 1)
 	service, err := cli.ServiceCreate(testContext, serviceSpec, types.ServiceCreateOptions{})
 	assert.NoError(t, err, "error creating service")
 
