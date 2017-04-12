@@ -47,9 +47,8 @@ func CleanTestServices(ctx context.Context, cli *client.Client, labels ...string
 	return nil
 }
 
-// truncServiceName truncates the service name to 63 characters, or 62 if the
-// last character is a dash.
-func truncServiceName(name string) string {
+// truncName truncates the name to 63 characters, or 62 if the last character is a dash.
+func truncName(name string) string {
 	// we don't need to truncate anything less than 63 characters
 	if len(name) < 63 {
 		return name
@@ -58,12 +57,16 @@ func truncServiceName(name string) string {
 	return strings.Trim(name[0:63], "-")
 }
 
+func getUniqueName(name string) string {
+	return truncName(name + UUID())
+}
+
 // CannedServiceSpec returns a ready-to-go service spec with name and replicas
-func CannedServiceSpec(cli *client.Client, name string, replicas uint64, labels ...string) swarm.ServiceSpec {
+func CannedServiceSpec(cli *client.Client, name string, replicas uint64, command, nw []string, labels ...string) swarm.ServiceSpec {
 	// first create the canned spec
 	spec := swarm.ServiceSpec{
 		Annotations: swarm.Annotations{
-			Name: truncServiceName(name + UUID()),
+			Name: truncName(name + UUID()),
 			Labels: map[string]string{
 				// the pre-mangled service name is a raw key-only label.
 				name:            "",
@@ -73,8 +76,7 @@ func CannedServiceSpec(cli *client.Client, name string, replicas uint64, labels 
 		},
 		TaskTemplate: swarm.TaskSpec{
 			ContainerSpec: swarm.ContainerSpec{
-				Image:   GetSelfImage(cli),
-				Command: []string{"util", "test-server"},
+				Image: GetSelfImage(cli),
 			},
 		},
 		Mode: swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: &replicas}},
@@ -86,6 +88,21 @@ func CannedServiceSpec(cli *client.Client, name string, replicas uint64, labels 
 				},
 			},
 		},
+	}
+
+	if command != nil {
+		spec.TaskTemplate.ContainerSpec.Command = command
+	} else {
+		spec.TaskTemplate.ContainerSpec.Command =
+			[]string{"util", "test-server"}
+	}
+	if nw != nil {
+		networks := []swarm.NetworkAttachmentConfig{}
+		for _, n := range nw {
+			networks = append(networks,
+				swarm.NetworkAttachmentConfig{Target: n})
+		}
+		spec.TaskTemplate.Networks = networks
 	}
 
 	// then, add labels

@@ -3,8 +3,10 @@ package dockere2e
 import (
 	// basic imports
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +23,75 @@ import (
 	"github.com/docker/docker/api/types/swarm"
 )
 
+func TestServiceDiscovery(t *testing.T) {
+	name := "TestServiceDiscovery"
+	testContext, _ := context.WithTimeout(context.Background(), 2*time.Minute)
+	// create a client
+	cli, err := GetClient()
+	assert.NoError(t, err, "Client creation failed")
+
+	nwName := getUniqueName("TestServiceDiscoveryOverlay")
+	nc := types.NetworkCreate{
+		Driver:         "overlay",
+		CheckDuplicate: true,
+		Attachable:     true,
+	}
+	_, err = cli.NetworkCreate(testContext, nwName, nc)
+	assert.NoError(t, err, "Error creating overlay network %s", nwName)
+
+	replicas := 3
+	spec := CannedServiceSpec(cli, name, uint64(replicas), []string{"util", "test-service-discovery"}, []string{nwName})
+
+	// create the service
+	service, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
+	assert.NoError(t, err, "Error creating service %s", name)
+
+	// make sure the service is up
+	ctx, _ := context.WithTimeout(testContext, 60*time.Second)
+	scaleCheck := ScaleCheck(service.ID, cli)
+	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 3))
+	assert.NoError(t, err)
+
+	// pick one cluster member IP to query the SD endpoint.
+	ips, err := GetNodeIps(cli)
+	assert.NoError(t, err, "error listing nodes to get IP")
+	assert.NotZero(t, ips, "no node ip addresses were returned")
+	endpoint := ips[0]
+
+	var published uint32
+	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
+	assert.NoError(t, err, "Error getting newly created service")
+	for _, port := range full.Endpoint.Ports {
+		if port.TargetPort == 80 {
+			published = port.PublishedPort
+			break
+		}
+	}
+	port := fmt.Sprintf(":%v", published)
+
+	tr := &http.Transport{}
+	client := &http.Client{Transport: tr, Timeout: time.Duration(5 * time.Second)}
+
+	qName := "tasks." + spec.Annotations.Name
+	resp, err := client.Get("http://" + endpoint + port + "/service-discovery?v4=" + qName)
+	assert.NoError(t, err, "Accessing /service-discovery endpoint failed")
+	defer resp.Body.Close()
+
+	result, err := ioutil.ReadAll(resp.Body)
+	assert.NoError(t, err, "Reading /service-discovery response failed")
+	ip := []net.IP{}
+	err = json.Unmarshal(result, &ip)
+	assert.Equal(t, replicas, len(ip), "incorrect number of task IPs in service-discovery response")
+
+	CleanTestServices(testContext, cli, name)
+	// Wait for the tasks to be removed before deleting the network
+	// TODO: covert to WaitForConverge for consistency
+	time.Sleep(3 * time.Second)
+
+	err = cli.NetworkRemove(testContext, nwName)
+	assert.NoError(t, err, "Error Deleting the overlay nework %s", nwName)
+}
+
 // tests the load balancer for services with public endpoints
 func TestNetworkExternalLb(t *testing.T) {
 	// TODO(dperny): there are debugging statements commented out. remove them.
@@ -32,7 +103,7 @@ func TestNetworkExternalLb(t *testing.T) {
 	assert.NoError(t, err, "Client creation failed")
 
 	replicas := 3
-	spec := CannedServiceSpec(cli, name, uint64(replicas))
+	spec := CannedServiceSpec(cli, name, uint64(replicas), nil, nil)
 	// expose a port
 	spec.EndpointSpec = &swarm.EndpointSpec{
 		Mode: swarm.ResolutionModeVIP,
@@ -57,7 +128,7 @@ func TestNetworkExternalLb(t *testing.T) {
 	assert.NoError(t, err)
 
 	var published uint32
-	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID)
+	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
 	assert.NoError(t, err, "Error getting newly created service")
 	for _, port := range full.Endpoint.Ports {
 		if port.TargetPort == 80 {
