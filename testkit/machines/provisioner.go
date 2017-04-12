@@ -3,6 +3,7 @@ package machines
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,50 +31,13 @@ var (
 	}
 
 	// Note: we can't use the hosts list, because the init system specifies -H and refuses to accept both
-	daemonJSON = map[string]string{
-		"standard": `{
-    "debug": true,
-    "tls": true,
-    "tlscacert": "/etc/docker/ca.pem",
-    "tlscert": "/etc/docker/cert.pem",
-    "tlskey": "/etc/docker/key.pem",
-    "tlsverify": true
-}
-`,
-		"devicemapper": `{
-    "debug": true,
-    "tls": true,
-    "tlscacert": "/etc/docker/ca.pem",
-    "tlscert": "/etc/docker/cert.pem",
-    "tlskey": "/etc/docker/key.pem",
-    "tlsverify": true,
-    "storage-driver": "devicemapper",
-    "storage-opts": [
-        "dm.thinpooldev=/dev/mapper/docker-thinpool",
-        "dm.use_deferred_removal=true",
-        "dm.use_deferred_deletion=true"
-    ]
-}
-`,
-		"zfs": `{
-    "debug": true,
-    "tls": true,
-    "tlscacert": "/etc/docker/ca.pem",
-    "tlscert": "/etc/docker/cert.pem",
-    "tlskey": "/etc/docker/key.pem",
-    "tlsverify": true,
-    "storage-driver": "zfs"
-}
-`,
-		"windows": `{
-    "debug": true,
-    "tls": true,
-    "tlscacert": "c:\\ProgramData\\docker\\ca.pem",
-    "tlscert": "c:\\ProgramData\\docker\\cert.pem",
-    "tlskey": "c:\\ProgramData\\docker\\key.pem",
-    "tlsverify": true
-}
-`,
+	daemonJSON = map[string]interface{}{
+		"debug":     true,
+		"tls":       true,
+		"tlscacert": "/etc/docker/ca.pem",
+		"tlscert":   "/etc/docker/cert.pem",
+		"tlskey":    "/etc/docker/key.pem",
+		"tlsverify": true,
 	}
 )
 
@@ -124,13 +88,18 @@ func VerifyDockerEngine(m Machine, localCertDir string) error {
 				resChan <- fmt.Errorf("Failed to create /etc/docker on %s: %s: %s", m.GetName(), err, out)
 				return
 			}
-			configOption := "standard"
 
 			// Check to see if we have devicemapper set up
 			out, err = m.MachineSSH("sudo vgs docker")
 			if err == nil {
 				log.Debugf("device-mapper detected - status is\n%s", out)
-				configOption = "devicemapper"
+				// Update the daemonJSON to include the device mapper settings
+				daemonJSON["storage-driver"] = "devicemapper"
+				daemonJSON["storage-opts"] = []string{
+					"dm.thinpooldev=/dev/mapper/docker-thinpool",
+					"dm.use_deferred_removal=true",
+					"dm.use_deferred_deletion=true",
+				}
 			} else {
 				log.Debugf("device-mapper not detected: %s: %s", err, out)
 
@@ -138,15 +107,29 @@ func VerifyDockerEngine(m Machine, localCertDir string) error {
 				out, err = m.MachineSSH("sudo zfs list -t all")
 				if err == nil {
 					log.Debugf("zfs detected - status is\n%s", out)
-					configOption = "zfs"
+					// Update the daemonJSON to include the ZFS mapper settings
+					daemonJSON["storage-driver"] = "zfs"
 				} else {
 					log.Debugf("zfs not detected: %s: %s", err, out)
 				}
 			}
 
-			data := bytes.NewBufferString(daemonJSON[configOption])
+			// Check for SELinux, and make the daemon enforce since that's what customers do...
+			out, err = m.MachineSSH("sudo getenforce")
+			if err == nil {
+				if strings.ToLower(strings.TrimSpace(out)) == "enforcing" {
+					log.Debug("Detected SELinux in enforcing mode")
+					daemonJSON["selinux-enabled"] = true
+				}
+			}
 
-			err = m.WriteFile("/etc/docker/daemon.json", data)
+			data, err := json.Marshal(daemonJSON)
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to generate daemon.json for %s: %s - %#v", m.GetName(), err, daemonJSON)
+				return
+			}
+
+			err = m.WriteFile("/etc/docker/daemon.json", bytes.NewBuffer(data))
 			if err != nil {
 				resChan <- fmt.Errorf("Failed to write daemon.json to %s: %s", m.GetName(), err)
 				return
@@ -327,7 +310,15 @@ func VerifyDockerEngineWindows(m Machine, localCertDir string) error {
 			// TODO - why do we sometimes get "lost connection"
 			time.Sleep(500 * time.Millisecond)
 
-			data := bytes.NewBufferString(daemonJSON["windows"])
+			// Modify the daemonJSON paths for windows
+			daemonJSON["tlscacert"] = `c:\ProgramData\docker\ca.pem`
+			daemonJSON["tlscert"] = `c:\ProgramData\docker\cert.pem`
+			daemonJSON["tlskey"] = `c:\ProgramData\docker\key.pem`
+			data, err := json.Marshal(daemonJSON)
+			if err != nil {
+				resChan <- fmt.Errorf("Failed to generate daemon.json for %s: %s - %#v", m.GetName(), err, daemonJSON)
+				return
+			}
 			// Make sure the path exists
 			out, err = m.MachineSSH(`powershell mkdir c:\ProgramData\docker\config`)
 			if err != nil {
@@ -335,7 +326,7 @@ func VerifyDockerEngineWindows(m Machine, localCertDir string) error {
 				return
 			}
 
-			err = m.WriteFile(`c:\ProgramData\docker\config\daemon.json`, data)
+			err = m.WriteFile(`c:\ProgramData\docker\config\daemon.json`, bytes.NewBuffer(data))
 			if err != nil {
 				resChan <- fmt.Errorf("Failed to write daemon.json to %s: %s", m.GetName(), err)
 				return
