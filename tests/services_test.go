@@ -56,7 +56,7 @@ func TestServicesCreate(t *testing.T) {
 	// up. In addition, CannedServiceSpec mangles the name and adds the uuid
 	// label that we rely on to isolate this particular instance of the tests
 	// from any other instance that may be running
-	serviceSpec := CannedServiceSpec(cli, name, 3)
+	serviceSpec := CannedServiceSpec(cli, name, 3, nil, nil)
 
 	// Now, do an API call. Pass testContext, which will take care of the
 	// timeout for us.
@@ -88,7 +88,7 @@ func TestServicesCreate(t *testing.T) {
 		// in this case, we're just waiting for inspect to return no errors,
 		// which should happen almost instantly. More complicated checks will
 		// have more complicated functions
-		_, _, err := cli.ServiceInspectWithRaw(ctx, serviceID)
+		_, _, err := cli.ServiceInspectWithRaw(ctx, serviceID, types.ServiceInspectOptions{})
 		if err != nil {
 			return err
 		}
@@ -113,7 +113,7 @@ func TestServicesScale(t *testing.T) {
 	assert.NoError(t, err, "could not create client")
 
 	// create a new service
-	serviceSpec := CannedServiceSpec(cli, name, 1)
+	serviceSpec := CannedServiceSpec(cli, name, 1, nil, nil)
 	service, err := cli.ServiceCreate(testContext, serviceSpec, types.ServiceCreateOptions{})
 	assert.NoError(t, err, "error creating service")
 
@@ -126,7 +126,7 @@ func TestServicesScale(t *testing.T) {
 	assert.NoError(t, err)
 
 	// get the full spec to make changes
-	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID)
+	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
 	// more replicas
 	var replicas uint64 = 3
 	full.Spec.Mode.Replicated.Replicas = &replicas
