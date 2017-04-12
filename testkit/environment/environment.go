@@ -259,6 +259,7 @@ func (c *Environment) Connect() error {
 			Auth: []ssh.AuthMethod{
 				auth,
 			},
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		},
 	)
 
