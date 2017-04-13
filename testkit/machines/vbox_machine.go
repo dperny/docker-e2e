@@ -244,8 +244,8 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 			wg.Add(1)
 			go func(m *VBoxMachine) {
 				var result error
-				out, err := m.MachineSSH(
-					fmt.Sprintf(`powershell rename-computer -newname "%s" -restart`, m.GetName()))
+				out, err := m.machineSSH(
+					fmt.Sprintf(`powershell rename-computer -newname "%s" -restart`, m.GetName()), false)
 				if err != nil {
 					log.Warnf("Failed to set hostname to %s: %s: %s", m.GetName(), err, out)
 				}
@@ -285,7 +285,7 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 				linuxMachines = append(linuxMachines, m)
 			}
 		}
-		return linuxMachines, nil, nil
+		return linuxMachines, windowsMachines, nil
 	case err := <-errChan:
 		return nil, nil, err
 	case <-timer.C:
@@ -612,6 +612,11 @@ func (m *VBoxMachine) GetInternalIP() (string, error) {
 
 // MachineSSH runs an ssh command and returns a string of the combined stdout/stderr output once done
 func (m *VBoxMachine) MachineSSH(command string) (string, error) {
+	return m.machineSSH(command, true)
+}
+
+// MachineSSH runs an ssh command and returns a string of the combined stdout/stderr output once done
+func (m *VBoxMachine) machineSSH(command string, wait bool) (string, error) {
 	buf := bytes.Buffer{}
 	args := []string{
 		"ssh", "-q",
@@ -649,8 +654,11 @@ func (m *VBoxMachine) MachineSSH(command string) (string, error) {
 		}()
 	*/
 
-	err = cmd.Wait()
-	return strings.TrimSpace(buf.String()), err
+	if wait {
+		err = cmd.Wait()
+		return strings.TrimSpace(buf.String()), err
+	}
+	return "", nil
 }
 
 // Get the contents of a specific file on the engine

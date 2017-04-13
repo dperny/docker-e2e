@@ -85,7 +85,7 @@ func injectLinuxNodeCerts(m Machine, localCertDir string) error {
 	if err != nil {
 		return err
 	}
-	ca, cert, key, err := GenerateNodeCerts(localCertDir, m.GetName(), []string{ip, internalIP, m.GetName()})
+	ca, cert, key, err := GenerateNodeCerts(localCertDir, m.GetName(), []string{ip, internalIP, m.GetName(), "127.0.0.1"})
 	if err != nil {
 		return fmt.Errorf("Failed to write cert locally: %s", err)
 	}
@@ -385,7 +385,7 @@ func VerifyDockerEngineWindows(m Machine, localCertDir string) error {
 				resChan <- fmt.Errorf("Failed to create daemoncerts dir %s: %s", m.GetName(), err, out)
 				return
 			}
-			ca, cert, key, err := GenerateNodeCerts(localCertDir, m.GetName(), []string{ip, internalIP, m.GetName()})
+			ca, cert, key, err := GenerateNodeCerts(localCertDir, m.GetName(), []string{ip, internalIP, m.GetName(), "127.0.0.1"})
 			if err != nil {
 				resChan <- fmt.Errorf("Failed to write cert locally: %s", err)
 				return
