@@ -91,6 +91,11 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 		return nil, nil, fmt.Errorf("To use the vbox driver, you must set VBOX_DISK_DIR to point to where your base OS disks and ssh key live")
 	}
 
+	err := VerifyCA(VBoxDiskDir)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	baseOSLinux := filepath.Join(VBoxDiskDir, VBoxOSLinux+".qcow2")
 	baseOSWindows := filepath.Join(VBoxDiskDir, VBoxOSWindows+".qcow2")
 
@@ -105,7 +110,14 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 		}
 	}
 
-	timer := time.NewTimer(60 * time.Minute) // TODO - make configurable
+	// Check for existence of an ssh key, and skip if not found
+	sshKeyPath := filepath.Join(VBoxDiskDir, "id_rsa")
+	if _, err := os.Stat(sshKeyPath); err != nil {
+		log.Debugf("No ssh key found, assuming password-less login. (%s)", sshKeyPath)
+		sshKeyPath = ""
+	}
+
+	timer := time.NewTimer(10 * time.Minute) // TODO - make configurable
 	errChan := make(chan error)
 	resChan := make(chan []*VBoxMachine)
 
@@ -123,7 +135,7 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 				CPUCount:    1,        // TODO - make configurable
 				Memory:      2048,     // TODO - make configurable
 				sshUser:     "docker", // TODO - make configurable
-				sshKeyPath:  filepath.Join(VBoxDiskDir, "id_rsa"),
+				sshKeyPath:  sshKeyPath,
 				DiskType:    "sata",
 				NICType:     "virtio",
 				DiskCtrl:    "IntelAHCI",
@@ -156,10 +168,6 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 			m.tlsConfig = &tls.Config{
 				Certificates: []tls.Certificate{cert},
 				RootCAs:      caCertPool,
-
-				// NOTE:This is insecure, but the test VMs have a short-lifespan
-				InsecureSkipVerify: true, // We don't verify so we can recyle the same certs regardless of VM IP
-
 			}
 			linuxMachines = append(linuxMachines, m)
 		}
@@ -172,7 +180,7 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 				CPUCount:    1,        // TODO - make configurable
 				Memory:      2048,     // TODO - make configurable
 				sshUser:     "docker", // TODO - make configurable
-				sshKeyPath:  filepath.Join(VBoxDiskDir, "id_rsa"),
+				sshKeyPath:  sshKeyPath,
 				DiskType:    "ide",
 				NICType:     "82540EM",
 				DiskCtrl:    "PIIX4",
@@ -205,10 +213,6 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 			m.tlsConfig = &tls.Config{
 				Certificates: []tls.Certificate{cert},
 				RootCAs:      caCertPool,
-
-				// NOTE:This is insecure, but the test VMs have a short-lifespan
-				InsecureSkipVerify: true, // We don't verify so we can recyle the same certs regardless of VM IP
-
 			}
 			windowsMachines = append(windowsMachines, m)
 		}
@@ -703,12 +707,16 @@ func (m *VBoxMachine) writeLocalFile(localFilePath, remoteFilePath string) error
 }
 
 func (m *VBoxMachine) GetConnectionEnv() string {
-	return strings.Join([]string{
+	lines := []string{
 		fmt.Sprintf(`export DOCKER_HOST="tcp://%s:2376"`, m.ip),
 		fmt.Sprintf(`export DOCKER_CERT_PATH="%s"`, VBoxDiskDir),
+		"export DOCKER_TLS_VERIFY=1",
 		fmt.Sprintf("# %s", m.MachineName),
-		fmt.Sprintf("# ssh -i %s %s@%s", m.sshKeyPath, m.sshUser, m.ip),
-		// TODO - once virsh generates valid SANs on derived certs add this
-		// "export DOCKER_TLS_VERIFY=1",
-	}, "\n")
+	}
+	if m.sshKeyPath != "" {
+		lines = append(lines, fmt.Sprintf("# ssh -i %s %s@%s", m.sshKeyPath, m.sshUser, m.ip))
+	} else {
+		lines = append(lines, fmt.Sprintf("# ssh %s@%s", m.sshUser, m.ip))
+	}
+	return strings.Join(lines, "\n")
 }
