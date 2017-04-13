@@ -57,6 +57,9 @@ func VerifyCA(rootCADir string) error {
 // GenerateNodeCerts will create a signed cert and key for the node
 // returns: ca, cert, key, error
 func GenerateNodeCerts(rootCADir, cn string, hosts []string) ([]byte, []byte, []byte, error) {
+	logrus.Debugf("Generating node cert for %s - %v", cn, hosts)
+	// Quiet down the cfssl logging
+	log.Level = log.LevelWarning
 	certDuration := time.Duration(10 * 365 * 24 * time.Hour)
 	s, err := local.NewSignerFromFile(
 		filepath.Join(rootCADir, "ca.pem"),
