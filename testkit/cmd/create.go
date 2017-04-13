@@ -45,18 +45,22 @@ var createCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		advertiseAddr, _ := cmd.Flags().GetString("advertise-addr")
 		listenAddr, _ := cmd.Flags().GetString("listen-addr")
+		machines := append(lm, wm...)
 		if !noInit {
 			// Init and join
-			cli, err := lm[0].GetEngineAPI()
+			cli, err := machines[0].GetEngineAPI()
 			if err != nil {
 				return err
 			}
-			log.Debug("Initializing swarm on %s", lm[0].GetName())
+			internalIP, err := machines[0].GetInternalIP()
+			if err != nil {
+				return err
+			}
+			log.Debugf("Initializing swarm on %s", machines[0].GetName())
 			_, err = cli.SwarmInit(context.TODO(), swarm.InitRequest{
 				ListenAddr:    listenAddr,
-				AdvertiseAddr: advertiseAddr,
+				AdvertiseAddr: internalIP,
 			})
 			if err != nil {
 				return err
@@ -69,7 +73,7 @@ var createCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			for _, m := range append(lm[1:], wm...) {
+			for _, m := range machines[1:] {
 				log.Debugf("Joining %s as worker", m.GetName())
 				cliW, err := m.GetEngineAPI()
 				if err != nil {
@@ -85,7 +89,7 @@ var createCmd = &cobra.Command{
 				}
 			}
 		}
-		for _, m := range append(lm, wm...) {
+		for _, m := range machines {
 			fmt.Println(m.GetConnectionEnv())
 			fmt.Println("")
 		}
@@ -96,6 +100,5 @@ var createCmd = &cobra.Command{
 func init() {
 	createCmd.Flags().BoolP("debug", "d", false, "enable verbose logging")
 	createCmd.Flags().BoolP("no-swarm", "n", false, "skip swarm init and join")
-	createCmd.Flags().String("advertise-addr", "", "passed to swarm init")
 	createCmd.Flags().String("listen-addr", "0.0.0.0:2377", "passed to swarm init and join")
 }
