@@ -70,7 +70,7 @@ You can directly ssh into a test environment by running `testkit ssh`.
 ```
 testkit create --name foo e2e.yml
 testkit attach foo
-export DOCKER_HOST=unix//$(pwd)/docker.sock docker info
+export DOCKER_HOST=unix://$(pwd)/docker.sock
 ```
 
 ### Running test locally
