@@ -11,7 +11,7 @@ RUN mkdir -p /go/src/github.com/docker/docker-e2e/testkit && \
 WORKDIR /go/src/github.com/docker/docker-e2e/testkit
 
 COPY . /go/src/github.com/docker/docker-e2e/testkit
-RUN go get -v -d ./... && \
+RUN \
 	go install -v && \
 	go install -v ./machines/build_machines && \
 	go install -v ./machines/virsh_inject_engine
