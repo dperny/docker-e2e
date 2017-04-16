@@ -70,10 +70,8 @@ func getServerVersion(m Machine) (string, error) {
 		}
 		lastErr = err
 	}
-	err = fmt.Errorf("Failed to get engine version before timing out: %s", lastErr)
-	log.Debug(err)
-	return "", err
 
+	return "", fmt.Errorf("Failed to get engine version before timing out: %s", lastErr)
 }
 
 func injectLinuxNodeCerts(m Machine, localCertDir string) error {
@@ -115,7 +113,6 @@ func VerifyDockerEngine(m Machine, localCertDir string) error {
 	resChan := make(chan error)
 
 	go func(m Machine) {
-
 		// First check to see if docker is already installed
 		err := checkDockerInstalled(m)
 		if err != nil {
@@ -126,7 +123,7 @@ func VerifyDockerEngine(m Machine, localCertDir string) error {
 			}
 
 			// Install the engine
-			out, err := m.MachineSSH("sudo mkdir -p /etc/docker; sudo chown docker /etc/docker")
+			out, err := m.MachineSSH("sudo mkdir -p /etc/docker; sudo chown $USER /etc/docker")
 			if err != nil {
 				resChan <- fmt.Errorf("Failed to create /etc/docker on %s: %s: %s", m.GetName(), err, out)
 				return

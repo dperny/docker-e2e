@@ -67,13 +67,16 @@ func GetTestMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 // GetTestMachinesWithDockerRootDir generates linux and windows machines in parallel
 // returning an array of linux machines, windows machines, and any error
 func GetTestMachinesWithDockerRootDir(linuxCount int, windowsCount int, dockerRootDir string) ([]Machine, []Machine, error) {
-	if os.Getenv("MACHINE_DRIVER") == "virsh" {
+	switch os.Getenv("MACHINE_DRIVER") {
+	case "virsh":
 		return NewVirshMachines(linuxCount, windowsCount) // TODO dockerRootDir
-	}
-	if os.Getenv("MACHINE_DRIVER") == "vbox" {
+	case "vbox":
 		return NewVBoxMachines(linuxCount, windowsCount)
+	case "aws":
+		return NewAWSMachines(linuxCount, windowsCount)
+	default:
+		return NewBuildMachines(linuxCount, windowsCount, dockerRootDir)
 	}
-	return NewBuildMachines(linuxCount, windowsCount, dockerRootDir)
 }
 
 func ListEnvironments() ([]*Environment, error) {
