@@ -40,11 +40,20 @@ var (
 	}
 )
 
-func getServerVersion(m Machine) (string, error) {
-	// During bootup, docker might take a while to start, so check to see if it looks like it's there
+// Perform a very basic check for the daemon being present
+func checkDockerInstalled(m Machine) error {
 	out, err := m.MachineSSH("docker --version")
 	if err != nil {
 		log.Debugf("Failed to check docker version: %s: %s", err, out)
+		return err
+	}
+	return nil
+}
+
+func getServerVersion(m Machine) (string, error) {
+	// During bootup, docker might take a while to start, so check to see if it looks like it's there
+	err := checkDockerInstalled(m)
+	if err != nil {
 		return "", err
 	}
 	// So the client is present...
@@ -61,16 +70,13 @@ func getServerVersion(m Machine) (string, error) {
 		}
 		lastErr = err
 	}
-	return "", fmt.Errorf("Failed to get engine version before timing out: %s", lastErr)
+	err = fmt.Errorf("Failed to get engine version before timing out: %s", lastErr)
+	log.Debug(err)
+	return "", err
 
 }
 
-// VerifyDockerEngine makes sure the machine has docker installed, and if not
-// will install the docker daemon
-func VerifyDockerEngine(m Machine, localCertDir string) error {
-	log.Debugf("Verifying or installing docker engine on %s", m.GetName())
-
-	resChan := make(chan error)
+func injectLinuxNodeCerts(m Machine, localCertDir string) error {
 	ip, err := m.GetIP()
 	if err != nil {
 		return err
@@ -79,11 +85,39 @@ func VerifyDockerEngine(m Machine, localCertDir string) error {
 	if err != nil {
 		return err
 	}
+	ca, cert, key, err := GenerateNodeCerts(localCertDir, m.GetName(), []string{ip, internalIP, m.GetName()})
+	if err != nil {
+		return fmt.Errorf("Failed to write cert locally: %s", err)
+	}
+	cabuf := bytes.NewBuffer(ca)
+	err = m.WriteFile("/etc/docker/ca.pem", cabuf)
+	if err != nil {
+		return fmt.Errorf("Failed to write ca.pem to %s: %s", m.GetName(), err)
+	}
+	certbuf := bytes.NewBuffer(cert)
+	err = m.WriteFile("/etc/docker/cert.pem", certbuf)
+	if err != nil {
+		return fmt.Errorf("Failed to write cert.pem to %s: %s", m.GetName(), err)
+	}
+	keybuf := bytes.NewBuffer(key)
+	err = m.WriteFile("/etc/docker/key.pem", keybuf)
+	if err != nil {
+		return fmt.Errorf("Failed to write key.pem to %s: %s", m.GetName(), err)
+	}
+	return nil
+}
+
+// VerifyDockerEngine makes sure the machine has docker installed, and if not
+// will install the docker daemon
+func VerifyDockerEngine(m Machine, localCertDir string) error {
+	log.Debugf("Verifying or installing docker engine on %s", m.GetName())
+
+	resChan := make(chan error)
 
 	go func(m Machine) {
 
 		// First check to see if docker is already installed
-		ver, err := getServerVersion(m)
+		err := checkDockerInstalled(m)
 		if err != nil {
 			// If the engine's not installed, then they have to specify CMD or URL (fail fast if not specified)
 			if EngineInstallCMD == "" && EngineInstallURL == "" {
@@ -143,28 +177,9 @@ func VerifyDockerEngine(m Machine, localCertDir string) error {
 				resChan <- fmt.Errorf("Failed to write daemon.json to %s: %s", m.GetName(), err)
 				return
 			}
-
-			ca, cert, key, err := GenerateNodeCerts(localCertDir, m.GetName(), []string{ip, internalIP, m.GetName()})
+			err = injectLinuxNodeCerts(m, localCertDir)
 			if err != nil {
-				resChan <- fmt.Errorf("Failed to write cert locally: %s", err)
-				return
-			}
-			cabuf := bytes.NewBuffer(ca)
-			err = m.WriteFile("/etc/docker/ca.pem", cabuf)
-			if err != nil {
-				resChan <- fmt.Errorf("Failed to write ca.pem to %s: %s", m.GetName(), err)
-				return
-			}
-			certbuf := bytes.NewBuffer(cert)
-			err = m.WriteFile("/etc/docker/cert.pem", certbuf)
-			if err != nil {
-				resChan <- fmt.Errorf("Failed to write cert.pem to %s: %s", m.GetName(), err)
-				return
-			}
-			keybuf := bytes.NewBuffer(key)
-			err = m.WriteFile("/etc/docker/key.pem", keybuf)
-			if err != nil {
-				resChan <- fmt.Errorf("Failed to write key.pem to %s: %s", m.GetName(), err)
+				resChan <- err
 				return
 			}
 
@@ -246,25 +261,29 @@ func VerifyDockerEngine(m Machine, localCertDir string) error {
 				resChan <- fmt.Errorf("Couldn't restart docker daemon...: %s: %s", err, out)
 				return
 			}
-
-			// End hacky daemon config goop
-
-			// Now wait for the daemon to start responding...
-			for {
-				ver, err = getServerVersion(m)
-				if err == nil {
-					log.Infof("Succesfully installed engine %s on %s", ver, m.GetName())
-					break
-				}
-				time.Sleep(500 * time.Millisecond)
-			}
 		} else {
-			// Make sure to bounce the daemon so it has the right hostname since we likely just set it
+			// Update the certs since the IP is most likely different
+			err := injectLinuxNodeCerts(m, localCertDir)
+			if err != nil {
+				resChan <- err
+				return
+			}
+
+			// Make sure to bounce the daemon so it has the right hostname and certs
 			out, err := m.MachineSSH("sudo systemctl restart docker.service")
 			if err != nil {
 				resChan <- fmt.Errorf("Couldn't restart docker daemon...: %s: %s", err, out)
 				return
 			}
+		}
+		// Now wait for the daemon to start responding...
+		for {
+			ver, err := getServerVersion(m)
+			if err == nil {
+				log.Infof("Succesfully installed engine %s on %s", ver, m.GetName())
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
 		log.Debugf("engine on %s is ready", m.GetName())
 		resChan <- nil
