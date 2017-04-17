@@ -268,7 +268,7 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 					log.Warnf("Failed to set hostname to %s: %s: %s", m.GetName(), err, out)
 				}
 				// Give it a few seconds to reboot before we start hammering on it...
-				time.Sleep(5 * time.Second) // TODO - need a better way to tell if we've finished the reboot
+				time.Sleep(10 * time.Second) // TODO - need a better way to tell if we've finished the reboot
 				result = VerifyDockerEngineWindows(m, VirshDiskDir)
 				machineErrChan <- result
 				wg.Done()
@@ -307,7 +307,7 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 	case err := <-errChan:
 		return nil, nil, err
 	case <-timer.C:
-		return nil, nil, fmt.Errorf("Unable to create %d machines within timeout", linuxCount)
+		return nil, nil, fmt.Errorf("Unable to create %d machines within timeout", linuxCount+windowsCount)
 	}
 }
 
