@@ -3,8 +3,10 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -13,6 +15,27 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/codegangsta/cli"
 )
+
+func TestServiceDiscovery(c *cli.Context) error {
+	http.HandleFunc("/service-discovery", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("v4")
+		if name == "" {
+			return
+		}
+		ips, err := net.LookupIP(name)
+		if err != nil {
+			return
+		}
+		json.NewEncoder(w).Encode(ips)
+	})
+
+	server := &http.Server{
+		Addr: c.String("listen-address"),
+	}
+
+	log.Infof("Listening on %s", c.String("listen-address"))
+	return server.ListenAndServe()
+}
 
 // TestServer is invoked for the `test-server` command
 func TestServer(c *cli.Context) error {
@@ -97,6 +120,21 @@ func TestTLSServer(c *cli.Context) error {
 	return nil
 }
 
+// `test-service-discovery` command returns the DNS lookup result for the passed record type and name
+var cmdTestServiceDiscovery = cli.Command{
+	Name:        "test-service-discovery",
+	Usage:       "util test-service-discovery",
+	Description: "returns the JSON encoded list of net.IP addresses for the name in url query at /service-discovery:<publish-port>?v4=name",
+	Action:      TestServiceDiscovery,
+	Flags: []cli.Flag{
+		cli.StringFlag{
+			Name:  "listen-address, l",
+			Usage: "Listen Address",
+			Value: ":80",
+		},
+	},
+}
+
 // The `test-server` command returns a simple 200 OK at the / endpoint, meant to debug port connectivity
 var cmdTestServer = cli.Command{
 	Name:  "test-server",
@@ -176,6 +214,7 @@ func main() {
 	app.Commands = []cli.Command{
 		cmdTestServer,
 		cmdTestTLSServer,
+		cmdTestServiceDiscovery,
 	}
 	log.SetFormatter(&log.JSONFormatter{})
 
