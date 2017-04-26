@@ -356,9 +356,9 @@ func VerifyDockerEngineWindows(m Machine, localCertDir string) error {
 			time.Sleep(500 * time.Millisecond)
 
 			// Modify the daemonJSON paths for windows
-			daemonJSON["tlscacert"] = `c:\ProgramData\docker\ca.pem`
-			daemonJSON["tlscert"] = `c:\ProgramData\docker\cert.pem`
-			daemonJSON["tlskey"] = `c:\ProgramData\docker\key.pem`
+			daemonJSON["tlscacert"] = `c:\ProgramData\docker\daemoncerts\ca.pem`
+			daemonJSON["tlscert"] = `c:\ProgramData\docker\daemoncerts\cert.pem`
+			daemonJSON["tlskey"] = `c:\ProgramData\docker\daemoncerts\key.pem`
 			data, err := json.Marshal(daemonJSON)
 			if err != nil {
 				resChan <- fmt.Errorf("Failed to generate daemon.json for %s: %s - %#v", m.GetName(), err, daemonJSON)
