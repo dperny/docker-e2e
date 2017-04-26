@@ -45,7 +45,10 @@ export DOCKER_CERT_PATH="%s"
 When done:
 virsh destroy %s
 virsh undefine %s
-`, ip, machines.VirshDiskDir, m.GetName(), m.GetName())
+or
+VBoxManage controlvm %s poweroff
+VBoxManage unregistervm %s --delete
+`, ip, machines.VirshDiskDir, m.GetName(), m.GetName(), m.GetName(), m.GetName())
 	}
 	for _, m := range wm {
 		// TODO - flesh out the windows stuff next...
@@ -64,7 +67,10 @@ export DOCKER_CERT_PATH="%s"
 When done:
 virsh destroy %s
 virsh undefine %s
-`, ip, machines.VirshDiskDir, m.GetName(), m.GetName())
+or
+VBoxManage controlvm %s poweroff
+VBoxManage unregistervm %s --delete
+`, ip, machines.VirshDiskDir, m.GetName(), m.GetName(), m.GetName(), m.GetName())
 	}
 
 }
