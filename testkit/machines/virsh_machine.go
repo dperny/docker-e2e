@@ -267,8 +267,19 @@ func NewVirshMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error
 				if err != nil {
 					log.Warnf("Failed to set hostname to %s: %s: %s", m.GetName(), err, out)
 				}
-				// Give it a few seconds to reboot before we start hammering on it...
-				time.Sleep(10 * time.Second) // TODO - need a better way to tell if we've finished the reboot
+				time.Sleep(10 * time.Second)
+				// Loop until we can ssh in
+				for {
+					out, err := m.MachineSSH("cmd /c echo test")
+					if err != nil {
+						time.Sleep(500 * time.Millisecond)
+					} else if strings.TrimSpace(out) == "" {
+						log.Debugf("Got empty output from the other side... trying again...")
+						time.Sleep(500 * time.Millisecond)
+					} else {
+						break
+					}
+				}
 				result = VerifyDockerEngineWindows(m, VirshDiskDir)
 				machineErrChan <- result
 				wg.Done()
