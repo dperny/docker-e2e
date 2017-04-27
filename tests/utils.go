@@ -2,8 +2,11 @@ package dockere2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -268,4 +271,42 @@ func GetSelfImage(cli *client.Client) string {
 		return containers[0].ImageID
 	}
 	return imageName
+}
+
+func serviceLookup(endpoint, port, qName string) ([]net.IP, error) {
+	tr := &http.Transport{}
+	client := &http.Client{Transport: tr, Timeout: time.Duration(5 * time.Second)}
+
+	resp, err := client.Get("http://" + endpoint + port + "/service-discovery?v4=" + qName)
+	if err != nil {
+		return nil, fmt.Errorf("Accessing /service-discovery endpoint failed")
+	}
+	defer resp.Body.Close()
+
+	result, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("Reading /service-discovery response failed")
+	}
+	ip := []net.IP{}
+	err = json.Unmarshal(result, &ip)
+	return ip, err
+}
+
+// utility function to fetch one cluster member IP and published port for the given targetPort
+func getNodeIPPort(cli *client.Client, c context.Context, id string, targetPort uint32) (string, uint32, error) {
+	ips, err := GetNodeIps(cli)
+	if err != nil || len(ips) == 0 {
+		return "", 0, fmt.Errorf("error listing nodes to get IP")
+	}
+
+	full, _, err := cli.ServiceInspectWithRaw(c, id, types.ServiceInspectOptions{})
+	if err != nil {
+		return "", 0, fmt.Errorf("error getting service")
+	}
+	for _, port := range full.Endpoint.Ports {
+		if port.TargetPort == targetPort {
+			return ips[0], port.PublishedPort, nil
+		}
+	}
+	return "", 0, fmt.Errorf("error getting PublishedPort for targetPort %d", targetPort)
 }

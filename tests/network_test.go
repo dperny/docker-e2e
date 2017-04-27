@@ -3,10 +3,8 @@ package dockere2e
 import (
 	// basic imports
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -20,9 +18,11 @@ import (
 
 	// docker api
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/swarm"
 )
 
+// test for Service Discovery in swarm tasks
 func TestServiceDiscovery(t *testing.T) {
 	name := "TestServiceDiscovery"
 	testContext, _ := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -34,13 +34,12 @@ func TestServiceDiscovery(t *testing.T) {
 	nc := types.NetworkCreate{
 		Driver:         "overlay",
 		CheckDuplicate: true,
-		Attachable:     true,
 	}
 	_, err = cli.NetworkCreate(testContext, nwName, nc)
 	assert.NoError(t, err, "Error creating overlay network %s", nwName)
 
-	replicas := 3
-	spec := CannedServiceSpec(cli, name, uint64(replicas), []string{"util", "test-service-discovery"}, []string{nwName})
+	var replicas uint64 = 3
+	spec := CannedServiceSpec(cli, name, replicas, []string{"util", "test-service-discovery"}, []string{nwName})
 
 	// create the service
 	service, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
@@ -49,40 +48,103 @@ func TestServiceDiscovery(t *testing.T) {
 	// make sure the service is up
 	ctx, _ := context.WithTimeout(testContext, 60*time.Second)
 	scaleCheck := ScaleCheck(service.ID, cli)
-	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 3))
+	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, int(replicas)))
 	assert.NoError(t, err)
 
-	// pick one cluster member IP to query the SD endpoint.
-	ips, err := GetNodeIps(cli)
-	assert.NoError(t, err, "error listing nodes to get IP")
-	assert.NotZero(t, ips, "no node ip addresses were returned")
-	endpoint := ips[0]
-
-	var published uint32
-	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
-	assert.NoError(t, err, "Error getting newly created service")
-	for _, port := range full.Endpoint.Ports {
-		if port.TargetPort == 80 {
-			published = port.PublishedPort
-			break
-		}
-	}
+	endpoint, published, err := getNodeIPPort(cli, testContext, service.ID, 80)
+	assert.NoError(t, err)
 	port := fmt.Sprintf(":%v", published)
 
-	tr := &http.Transport{}
-	client := &http.Client{Transport: tr, Timeout: time.Duration(5 * time.Second)}
-
 	qName := "tasks." + spec.Annotations.Name
-	resp, err := client.Get("http://" + endpoint + port + "/service-discovery?v4=" + qName)
-	assert.NoError(t, err, "Accessing /service-discovery endpoint failed")
-	defer resp.Body.Close()
+	ip, err := serviceLookup(endpoint, port, qName)
+	assert.NoError(t, err)
+	assert.Equal(t, int(replicas), len(ip), "incorrect number of task IPs in service-discovery response")
 
-	result, err := ioutil.ReadAll(resp.Body)
-	assert.NoError(t, err, "Reading /service-discovery response failed")
-	ip := []net.IP{}
-	err = json.Unmarshal(result, &ip)
-	assert.Equal(t, replicas, len(ip), "incorrect number of task IPs in service-discovery response")
+	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
+	//scale up & scale down the service and verify the SD entries get updated
+	replicas = 4
+	full.Spec.Mode.Replicated.Replicas = &replicas
+	version := full.Meta.Version
+	_, err = cli.ServiceUpdate(testContext, service.ID, version, full.Spec, types.ServiceUpdateOptions{})
+	assert.NoError(t, err)
+	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, int(replicas)))
+	assert.NoError(t, err)
 
+	full, _, err = cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
+	replicas = 2
+	full.Spec.Mode.Replicated.Replicas = &replicas
+	version = full.Meta.Version
+	_, err = cli.ServiceUpdate(testContext, service.ID, version, full.Spec, types.ServiceUpdateOptions{})
+	assert.NoError(t, err)
+	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, int(replicas)))
+	assert.NoError(t, err)
+
+	ip, err = serviceLookup(endpoint, port, qName)
+	assert.NoError(t, err)
+	assert.Equal(t, int(replicas), len(ip), "incorrect number of task IPs in service-discovery response")
+
+	CleanTestServices(testContext, cli, name)
+	// Wait for the tasks to be removed before deleting the network
+	// TODO: covert to WaitForConverge for consistency
+	time.Sleep(3 * time.Second)
+
+	err = cli.NetworkRemove(testContext, nwName)
+	assert.NoError(t, err, "Error Deleting the overlay nework %s", nwName)
+}
+
+// test for unmanaged container creation on an attached network and SD for unmanaged
+// containers from service tasks.
+func TestAttachableNetwork(t *testing.T) {
+	name := "TestAttachableNetwork"
+	testContext, _ := context.WithTimeout(context.Background(), 2*time.Minute)
+	// create a client
+	cli, err := GetClient()
+	assert.NoError(t, err, "Client creation failed")
+
+	nwName := getUniqueName("TestAttachableNetwork")
+	nc := types.NetworkCreate{
+		Driver:         "overlay",
+		CheckDuplicate: true,
+		Attachable:     true,
+	}
+	_, err = cli.NetworkCreate(testContext, nwName, nc)
+	assert.NoError(t, err, "Error creating overlay network %s", nwName)
+
+	config := &container.Config{
+		//Image: "dockerswarm/e2e",
+		//Cmd:   []string{"util", "test-server"},
+		Image: "nginx",
+	}
+	hostConfig := &container.HostConfig{
+		AutoRemove:  true,
+		NetworkMode: container.NetworkMode(nwName),
+	}
+	resp, err := cli.ContainerCreate(testContext, config, hostConfig, nil, "test-container")
+	assert.NoError(t, err)
+	err = cli.ContainerStart(testContext, resp.ID, types.ContainerStartOptions{})
+	assert.NoError(t, err)
+
+	spec := CannedServiceSpec(cli, name, 1, []string{"util", "test-service-discovery"}, []string{nwName})
+	// create the service
+	service, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
+	assert.NoError(t, err, "Error creating service %s", name)
+
+	// make sure the service is up
+	ctx, _ := context.WithTimeout(testContext, 60*time.Second)
+	scaleCheck := ScaleCheck(service.ID, cli)
+	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 1))
+	assert.NoError(t, err)
+
+	endpoint, published, err := getNodeIPPort(cli, testContext, service.ID, 80)
+	assert.NoError(t, err)
+	port := fmt.Sprintf(":%v", published)
+
+	ip, err := serviceLookup(endpoint, port, "test-container")
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(ip), "incorrect number of task IPs in service-discovery response")
+
+	err = cli.ContainerRemove(testContext, resp.ID, types.ContainerRemoveOptions{Force: true})
+	assert.NoError(t, err)
 	CleanTestServices(testContext, cli, name)
 	// Wait for the tasks to be removed before deleting the network
 	// TODO: covert to WaitForConverge for consistency
