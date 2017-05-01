@@ -11,7 +11,7 @@ import (
 	"time"
 
 	// testify
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	// http is used to test network endpoints
 	"net/http"
@@ -28,7 +28,7 @@ func TestServiceDiscovery(t *testing.T) {
 	testContext, _ := context.WithTimeout(context.Background(), 2*time.Minute)
 	// create a client
 	cli, err := GetClient()
-	assert.NoError(t, err, "Client creation failed")
+	require.NoError(t, err, "Client creation failed")
 
 	nwName := getUniqueName("TestServiceDiscoveryOverlay")
 	nc := types.NetworkCreate{
@@ -36,29 +36,36 @@ func TestServiceDiscovery(t *testing.T) {
 		CheckDuplicate: true,
 	}
 	_, err = cli.NetworkCreate(testContext, nwName, nc)
-	assert.NoError(t, err, "Error creating overlay network %s", nwName)
+	require.NoError(t, err, "Error creating overlay network %s", nwName)
+	defer cli.NetworkRemove(testContext, nwName)
 
 	var replicas uint64 = 3
 	spec := CannedServiceSpec(cli, name, replicas, []string{"util", "test-service-discovery"}, []string{nwName})
 
 	// create the service
 	service, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
-	assert.NoError(t, err, "Error creating service %s", name)
+	require.NoError(t, err, "Error creating service %s", name)
+	defer func() {
+		CleanTestServices(testContext, cli, name)
+		// Wait for the tasks to be removed before deleting the network
+		// TODO: covert to WaitForConverge for consistency
+		time.Sleep(3 * time.Second)
+	}()
 
 	// make sure the service is up
 	ctx, _ := context.WithTimeout(testContext, 60*time.Second)
 	scaleCheck := ScaleCheck(service.ID, cli)
 	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, int(replicas)))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	endpoint, published, err := getNodeIPPort(cli, testContext, service.ID, 80)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	port := fmt.Sprintf(":%v", published)
 
 	qName := "tasks." + spec.Annotations.Name
 	ip, err := serviceLookup(endpoint, port, qName)
-	assert.NoError(t, err)
-	assert.Equal(t, int(replicas), len(ip), "incorrect number of task IPs in service-discovery response")
+	require.NoError(t, err)
+	require.Equal(t, int(replicas), len(ip), "incorrect number of task IPs in service-discovery response")
 
 	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
 	//scale up & scale down the service and verify the SD entries get updated
@@ -66,30 +73,22 @@ func TestServiceDiscovery(t *testing.T) {
 	full.Spec.Mode.Replicated.Replicas = &replicas
 	version := full.Meta.Version
 	_, err = cli.ServiceUpdate(testContext, service.ID, version, full.Spec, types.ServiceUpdateOptions{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, int(replicas)))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	full, _, err = cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
 	replicas = 2
 	full.Spec.Mode.Replicated.Replicas = &replicas
 	version = full.Meta.Version
 	_, err = cli.ServiceUpdate(testContext, service.ID, version, full.Spec, types.ServiceUpdateOptions{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, int(replicas)))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	ip, err = serviceLookup(endpoint, port, qName)
-	assert.NoError(t, err)
-	assert.Equal(t, int(replicas), len(ip), "incorrect number of task IPs in service-discovery response")
-
-	CleanTestServices(testContext, cli, name)
-	// Wait for the tasks to be removed before deleting the network
-	// TODO: covert to WaitForConverge for consistency
-	time.Sleep(3 * time.Second)
-
-	err = cli.NetworkRemove(testContext, nwName)
-	assert.NoError(t, err, "Error Deleting the overlay nework %s", nwName)
+	require.NoError(t, err)
+	require.Equal(t, int(replicas), len(ip), "incorrect number of task IPs in service-discovery response")
 }
 
 // test for unmanaged container creation on an attached network and SD for unmanaged
@@ -99,7 +98,7 @@ func TestAttachableNetwork(t *testing.T) {
 	testContext, _ := context.WithTimeout(context.Background(), 2*time.Minute)
 	// create a client
 	cli, err := GetClient()
-	assert.NoError(t, err, "Client creation failed")
+	require.NoError(t, err, "Client creation failed")
 
 	nwName := getUniqueName("TestAttachableNetwork")
 	nc := types.NetworkCreate{
@@ -108,50 +107,67 @@ func TestAttachableNetwork(t *testing.T) {
 		Attachable:     true,
 	}
 	_, err = cli.NetworkCreate(testContext, nwName, nc)
-	assert.NoError(t, err, "Error creating overlay network %s", nwName)
+	require.NoError(t, err, "Error creating overlay network %s", nwName)
+	defer cli.NetworkRemove(testContext, nwName)
 
+	image := GetSelfImage(cli)
+	if _, _, err := cli.ImageInspectWithRaw(context.TODO(), image); err != nil {
+		ticker := time.NewTicker(2 * time.Minute)
+		ch := make(chan bool)
+		go func(ch chan bool) {
+			r, err := cli.ImagePull(context.TODO(), image, types.ImagePullOptions{})
+			require.NoError(t, err, "Error pulling the image, %s", image)
+			_, err = ioutil.ReadAll(r)
+			r.Close()
+			require.NoError(t, err, "Error reading pull response")
+			ch <- true
+		}(ch)
+		select {
+		case <-ticker.C:
+			require.Error(t, fmt.Errorf("Image %s pull timed out", image))
+		case <-ch:
+		}
+	}
 	config := &container.Config{
-		//Image: "dockerswarm/e2e",
-		//Cmd:   []string{"util", "test-server"},
-		Image: "nginx",
+		Image: image,
+		Cmd:   []string{"util", "test-server"},
 	}
 	hostConfig := &container.HostConfig{
 		AutoRemove:  true,
 		NetworkMode: container.NetworkMode(nwName),
 	}
 	resp, err := cli.ContainerCreate(testContext, config, hostConfig, nil, "test-container")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = cli.ContainerStart(testContext, resp.ID, types.ContainerStartOptions{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	spec := CannedServiceSpec(cli, name, 1, []string{"util", "test-service-discovery"}, []string{nwName})
 	// create the service
 	service, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
-	assert.NoError(t, err, "Error creating service %s", name)
+	require.NoError(t, err, "Error creating service %s", name)
+	defer func() {
+		CleanTestServices(testContext, cli, name)
+		// Wait for the tasks to be removed before deleting the network
+		// TODO: covert to WaitForConverge for consistency
+		time.Sleep(3 * time.Second)
+	}()
 
 	// make sure the service is up
 	ctx, _ := context.WithTimeout(testContext, 60*time.Second)
 	scaleCheck := ScaleCheck(service.ID, cli)
 	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 1))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	endpoint, published, err := getNodeIPPort(cli, testContext, service.ID, 80)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	port := fmt.Sprintf(":%v", published)
 
 	ip, err := serviceLookup(endpoint, port, "test-container")
-	assert.NoError(t, err)
-	assert.Equal(t, 1, len(ip), "incorrect number of task IPs in service-discovery response")
+	require.NoError(t, err)
+	require.Equal(t, 1, len(ip), "incorrect number of task IPs in service-discovery response")
 
 	err = cli.ContainerRemove(testContext, resp.ID, types.ContainerRemoveOptions{Force: true})
-	assert.NoError(t, err)
-	CleanTestServices(testContext, cli, name)
-	// Wait for the tasks to be removed before deleting the network
-	// TODO: covert to WaitForConverge for consistency
-	time.Sleep(3 * time.Second)
-
-	err = cli.NetworkRemove(testContext, nwName)
-	assert.NoError(t, err, "Error Deleting the overlay nework %s", nwName)
+	require.NoError(t, err)
 }
 
 // tests the load balancer for services with public endpoints
@@ -162,7 +178,7 @@ func TestNetworkExternalLb(t *testing.T) {
 	testContext, _ := context.WithTimeout(context.Background(), 2*time.Minute)
 	// create a client
 	cli, err := GetClient()
-	assert.NoError(t, err, "Client creation failed")
+	require.NoError(t, err, "Client creation failed")
 
 	replicas := 3
 	spec := CannedServiceSpec(cli, name, uint64(replicas), nil, nil)
@@ -179,19 +195,20 @@ func TestNetworkExternalLb(t *testing.T) {
 
 	// create the service
 	service, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
-	assert.NoError(t, err, "Error creating service")
-	assert.NotNil(t, service, "Resp is nil for some reason")
-	assert.NotZero(t, service.ID, "serviceonse ID is zero, something is amiss")
+	require.NoError(t, err, "Error creating service")
+	require.NotNil(t, service, "Resp is nil for some reason")
+	require.NotZero(t, service.ID, "serviceonse ID is zero, something is amiss")
+	defer CleanTestServices(testContext, cli, name)
 
 	// now make sure the service comes up
 	ctx, _ := context.WithTimeout(testContext, 60*time.Second)
 	scaleCheck := ScaleCheck(service.ID, cli)
 	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 3))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	var published uint32
 	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
-	assert.NoError(t, err, "Error getting newly created service")
+	require.NoError(t, err, "Error getting newly created service")
 	for _, port := range full.Endpoint.Ports {
 		if port.TargetPort == 80 {
 			published = port.PublishedPort
@@ -218,8 +235,8 @@ func TestNetworkExternalLb(t *testing.T) {
 	// select the network endpoint we're going to hit
 	// list the nodes
 	ips, err := GetNodeIps(cli)
-	assert.NoError(t, err, "error listing nodes to get IP")
-	assert.NotZero(t, ips, "no node ip addresses were returned")
+	require.NoError(t, err, "error listing nodes to get IP")
+	require.NotZero(t, ips, "no node ip addresses were returned")
 	// take the first node
 	endpoint := ips[0]
 
@@ -308,7 +325,6 @@ func TestNetworkExternalLb(t *testing.T) {
 	// cancel the context to stop polling
 	cancel()
 
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	CleanTestServices(testContext, cli, name)
 }

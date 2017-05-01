@@ -273,6 +273,7 @@ func GetSelfImage(cli *client.Client) string {
 	return imageName
 }
 
+// serviceLookup resolves the passed name by using the test server's /service-discovery endpoint
 func serviceLookup(endpoint, port, qName string) ([]net.IP, error) {
 	tr := &http.Transport{}
 	client := &http.Client{Transport: tr, Timeout: time.Duration(5 * time.Second)}
@@ -292,7 +293,7 @@ func serviceLookup(endpoint, port, qName string) ([]net.IP, error) {
 	return ip, err
 }
 
-// utility function to fetch one cluster member IP and published port for the given targetPort
+// getNodeIPPort fetchces one cluster member IP and published port for the given targetPort
 func getNodeIPPort(cli *client.Client, c context.Context, id string, targetPort uint32) (string, uint32, error) {
 	ips, err := GetNodeIps(cli)
 	if err != nil || len(ips) == 0 {
