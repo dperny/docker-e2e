@@ -244,8 +244,8 @@ func NewVBoxMachines(linuxCount, windowsCount int) ([]Machine, []Machine, error)
 			wg.Add(1)
 			go func(m *VBoxMachine) {
 				var result error
-				out, err := m.machineSSH(
-					fmt.Sprintf(`powershell rename-computer -newname "%s" -restart`, m.GetName()), false)
+				out, err := m.MachineSSH(
+					fmt.Sprintf(`powershell rename-computer -force -newname "%s" -restart; exit`, m.GetName()))
 				if err != nil {
 					log.Warnf("Failed to set hostname to %s: %s: %s", m.GetName(), err, out)
 				}
