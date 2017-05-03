@@ -3,93 +3,171 @@ package dockere2e
 import (
 	// basic imports
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	// testify
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	// http is used to test network endpoints
 	"net/http"
 
 	// docker api
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/swarm"
 )
 
+// test for Service Discovery in swarm tasks
 func TestServiceDiscovery(t *testing.T) {
 	name := "TestServiceDiscovery"
 	testContext, _ := context.WithTimeout(context.Background(), 2*time.Minute)
 	// create a client
 	cli, err := GetClient()
-	assert.NoError(t, err, "Client creation failed")
+	require.NoError(t, err, "Client creation failed")
 
 	nwName := getUniqueName("TestServiceDiscoveryOverlay")
+	nc := types.NetworkCreate{
+		Driver:         "overlay",
+		CheckDuplicate: true,
+	}
+	_, err = cli.NetworkCreate(testContext, nwName, nc)
+	require.NoError(t, err, "Error creating overlay network %s", nwName)
+	defer cli.NetworkRemove(testContext, nwName)
+
+	var replicas uint64 = 3
+	spec := CannedServiceSpec(cli, name, replicas, []string{"util", "test-service-discovery"}, []string{nwName})
+
+	// create the service
+	service, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
+	require.NoError(t, err, "Error creating service %s", name)
+	defer func() {
+		CleanTestServices(testContext, cli, name)
+		// Wait for the tasks to be removed before deleting the network
+		// TODO: covert to WaitForConverge for consistency
+		time.Sleep(3 * time.Second)
+	}()
+
+	// make sure the service is up
+	ctx, _ := context.WithTimeout(testContext, 60*time.Second)
+	scaleCheck := ScaleCheck(service.ID, cli)
+	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, int(replicas)))
+	require.NoError(t, err)
+
+	endpoint, published, err := getNodeIPPort(cli, testContext, service.ID, 80)
+	require.NoError(t, err)
+	port := fmt.Sprintf(":%v", published)
+
+	qName := "tasks." + spec.Annotations.Name
+	ip, err := serviceLookup(endpoint, port, qName)
+	require.NoError(t, err)
+	require.Equal(t, int(replicas), len(ip), "incorrect number of task IPs in service-discovery response")
+
+	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
+	//scale up & scale down the service and verify the SD entries get updated
+	replicas = 4
+	full.Spec.Mode.Replicated.Replicas = &replicas
+	version := full.Meta.Version
+	_, err = cli.ServiceUpdate(testContext, service.ID, version, full.Spec, types.ServiceUpdateOptions{})
+	require.NoError(t, err)
+	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, int(replicas)))
+	require.NoError(t, err)
+
+	full, _, err = cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
+	replicas = 2
+	full.Spec.Mode.Replicated.Replicas = &replicas
+	version = full.Meta.Version
+	_, err = cli.ServiceUpdate(testContext, service.ID, version, full.Spec, types.ServiceUpdateOptions{})
+	require.NoError(t, err)
+	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, int(replicas)))
+	require.NoError(t, err)
+
+	ip, err = serviceLookup(endpoint, port, qName)
+	require.NoError(t, err)
+	require.Equal(t, int(replicas), len(ip), "incorrect number of task IPs in service-discovery response")
+}
+
+// test for unmanaged container creation on an attached network and SD for unmanaged
+// containers from service tasks.
+func TestAttachableNetwork(t *testing.T) {
+	name := "TestAttachableNetwork"
+	testContext, _ := context.WithTimeout(context.Background(), 2*time.Minute)
+	// create a client
+	cli, err := GetClient()
+	require.NoError(t, err, "Client creation failed")
+
+	nwName := getUniqueName("TestAttachableNetwork")
 	nc := types.NetworkCreate{
 		Driver:         "overlay",
 		CheckDuplicate: true,
 		Attachable:     true,
 	}
 	_, err = cli.NetworkCreate(testContext, nwName, nc)
-	assert.NoError(t, err, "Error creating overlay network %s", nwName)
+	require.NoError(t, err, "Error creating overlay network %s", nwName)
+	defer cli.NetworkRemove(testContext, nwName)
 
-	replicas := 3
-	spec := CannedServiceSpec(cli, name, uint64(replicas), []string{"util", "test-service-discovery"}, []string{nwName})
+	image := GetSelfImage(cli)
+	if _, _, err := cli.ImageInspectWithRaw(context.TODO(), image); err != nil {
+		ticker := time.NewTicker(2 * time.Minute)
+		ch := make(chan bool)
+		go func(ch chan bool) {
+			r, err := cli.ImagePull(context.TODO(), image, types.ImagePullOptions{})
+			require.NoError(t, err, "Error pulling the image, %s", image)
+			_, err = ioutil.ReadAll(r)
+			r.Close()
+			require.NoError(t, err, "Error reading pull response")
+			ch <- true
+		}(ch)
+		select {
+		case <-ticker.C:
+			require.Error(t, fmt.Errorf("Image %s pull timed out", image))
+		case <-ch:
+		}
+	}
+	config := &container.Config{
+		Image: image,
+		Cmd:   []string{"util", "test-server"},
+	}
+	hostConfig := &container.HostConfig{
+		AutoRemove:  true,
+		NetworkMode: container.NetworkMode(nwName),
+	}
+	resp, err := cli.ContainerCreate(testContext, config, hostConfig, nil, "test-container")
+	require.NoError(t, err)
+	err = cli.ContainerStart(testContext, resp.ID, types.ContainerStartOptions{})
+	require.NoError(t, err)
 
+	spec := CannedServiceSpec(cli, name, 1, []string{"util", "test-service-discovery"}, []string{nwName})
 	// create the service
 	service, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
-	assert.NoError(t, err, "Error creating service %s", name)
+	require.NoError(t, err, "Error creating service %s", name)
+	defer func() {
+		CleanTestServices(testContext, cli, name)
+		// Wait for the tasks to be removed before deleting the network
+		// TODO: covert to WaitForConverge for consistency
+		time.Sleep(3 * time.Second)
+	}()
 
 	// make sure the service is up
 	ctx, _ := context.WithTimeout(testContext, 60*time.Second)
 	scaleCheck := ScaleCheck(service.ID, cli)
-	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 3))
-	assert.NoError(t, err)
+	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 1))
+	require.NoError(t, err)
 
-	// pick one cluster member IP to query the SD endpoint.
-	ips, err := GetNodeIps(cli)
-	assert.NoError(t, err, "error listing nodes to get IP")
-	assert.NotZero(t, ips, "no node ip addresses were returned")
-	endpoint := ips[0]
-
-	var published uint32
-	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
-	assert.NoError(t, err, "Error getting newly created service")
-	for _, port := range full.Endpoint.Ports {
-		if port.TargetPort == 80 {
-			published = port.PublishedPort
-			break
-		}
-	}
+	endpoint, published, err := getNodeIPPort(cli, testContext, service.ID, 80)
+	require.NoError(t, err)
 	port := fmt.Sprintf(":%v", published)
 
-	tr := &http.Transport{}
-	client := &http.Client{Transport: tr, Timeout: time.Duration(5 * time.Second)}
+	ip, err := serviceLookup(endpoint, port, "test-container")
+	require.NoError(t, err)
+	require.Equal(t, 1, len(ip), "incorrect number of task IPs in service-discovery response")
 
-	qName := "tasks." + spec.Annotations.Name
-	resp, err := client.Get("http://" + endpoint + port + "/service-discovery?v4=" + qName)
-	assert.NoError(t, err, "Accessing /service-discovery endpoint failed")
-	defer resp.Body.Close()
-
-	result, err := ioutil.ReadAll(resp.Body)
-	assert.NoError(t, err, "Reading /service-discovery response failed")
-	ip := []net.IP{}
-	err = json.Unmarshal(result, &ip)
-	assert.Equal(t, replicas, len(ip), "incorrect number of task IPs in service-discovery response")
-
-	CleanTestServices(testContext, cli, name)
-	// Wait for the tasks to be removed before deleting the network
-	// TODO: covert to WaitForConverge for consistency
-	time.Sleep(3 * time.Second)
-
-	err = cli.NetworkRemove(testContext, nwName)
-	assert.NoError(t, err, "Error Deleting the overlay nework %s", nwName)
+	err = cli.ContainerRemove(testContext, resp.ID, types.ContainerRemoveOptions{Force: true})
+	require.NoError(t, err)
 }
 
 // tests the load balancer for services with public endpoints
@@ -100,7 +178,7 @@ func TestNetworkExternalLb(t *testing.T) {
 	testContext, _ := context.WithTimeout(context.Background(), 2*time.Minute)
 	// create a client
 	cli, err := GetClient()
-	assert.NoError(t, err, "Client creation failed")
+	require.NoError(t, err, "Client creation failed")
 
 	replicas := 3
 	spec := CannedServiceSpec(cli, name, uint64(replicas), nil, nil)
@@ -117,19 +195,20 @@ func TestNetworkExternalLb(t *testing.T) {
 
 	// create the service
 	service, err := cli.ServiceCreate(testContext, spec, types.ServiceCreateOptions{})
-	assert.NoError(t, err, "Error creating service")
-	assert.NotNil(t, service, "Resp is nil for some reason")
-	assert.NotZero(t, service.ID, "serviceonse ID is zero, something is amiss")
+	require.NoError(t, err, "Error creating service")
+	require.NotNil(t, service, "Resp is nil for some reason")
+	require.NotZero(t, service.ID, "serviceonse ID is zero, something is amiss")
+	defer CleanTestServices(testContext, cli, name)
 
 	// now make sure the service comes up
 	ctx, _ := context.WithTimeout(testContext, 60*time.Second)
 	scaleCheck := ScaleCheck(service.ID, cli)
 	err = WaitForConverge(ctx, 1*time.Second, scaleCheck(ctx, 3))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	var published uint32
 	full, _, err := cli.ServiceInspectWithRaw(testContext, service.ID, types.ServiceInspectOptions{})
-	assert.NoError(t, err, "Error getting newly created service")
+	require.NoError(t, err, "Error getting newly created service")
 	for _, port := range full.Endpoint.Ports {
 		if port.TargetPort == 80 {
 			published = port.PublishedPort
@@ -156,8 +235,8 @@ func TestNetworkExternalLb(t *testing.T) {
 	// select the network endpoint we're going to hit
 	// list the nodes
 	ips, err := GetNodeIps(cli)
-	assert.NoError(t, err, "error listing nodes to get IP")
-	assert.NotZero(t, ips, "no node ip addresses were returned")
+	require.NoError(t, err, "error listing nodes to get IP")
+	require.NotZero(t, ips, "no node ip addresses were returned")
 	// take the first node
 	endpoint := ips[0]
 
@@ -246,7 +325,6 @@ func TestNetworkExternalLb(t *testing.T) {
 	// cancel the context to stop polling
 	cancel()
 
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	CleanTestServices(testContext, cli, name)
 }
