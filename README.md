@@ -7,9 +7,8 @@ apis to real Docker Engines running real containers.
 
 ## Overview
 The tests are built with the `go test` framework, but are most easily run from
-inside of a container. The tests are run with `--net=host` and the docker 
-socket bind-mounted into the container at `/var/run/docker.sock`. This 
-container is run on a Manager node.
+inside of a container. The docker socket bind-mounted into the container at
+`/var/run/docker.sock`. This container is run on a Manager node.
 
 The tests are designed to be run on a real, multi-node cluster so their 
 functionality, utility, and accuracy are reduced in a single-node environment. 
@@ -80,7 +79,7 @@ $ testkit create --name myenv e2e.yml
 $ testkit attach myenv
 [do some test changes]
 $ docker build -t e2e .
-$ docker run --net=host -v /var/run/docker.sock:/var/run/docker.sock e2e
+$ docker run -v /var/run/docker.sock:/var/run/docker.sock e2e
 ```
 
 ## Testkit Machines management

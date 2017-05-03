@@ -10,4 +10,4 @@ commands:
     - docker version
     - docker info
     - docker pull dockerswarm/e2e
-    - docker run -v /var/run/docker.sock:/var/run/docker.sock --net=host dockerswarm/e2e
+    - docker run -v /var/run/docker.sock:/var/run/docker.sock dockerswarm/e2e
