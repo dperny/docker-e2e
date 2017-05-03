@@ -129,13 +129,18 @@ func VerifyDockerEngine(m Machine, localCertDir string) error {
 				return
 			}
 
+			machineDaemonJSON := map[string]interface{}{}
+			for k, v := range daemonJSON {
+				machineDaemonJSON[k] = v
+			}
+
 			// Check to see if we have devicemapper set up
 			out, err = m.MachineSSH("sudo vgs docker")
 			if err == nil {
 				log.Debugf("device-mapper detected - status is\n%s", out)
 				// Update the daemonJSON to include the device mapper settings
-				daemonJSON["storage-driver"] = "devicemapper"
-				daemonJSON["storage-opts"] = []string{
+				machineDaemonJSON["storage-driver"] = "devicemapper"
+				machineDaemonJSON["storage-opts"] = []string{
 					"dm.thinpooldev=/dev/mapper/docker-thinpool",
 					"dm.use_deferred_removal=true",
 					"dm.use_deferred_deletion=true",
@@ -148,7 +153,7 @@ func VerifyDockerEngine(m Machine, localCertDir string) error {
 				if err == nil {
 					log.Debugf("zfs detected - status is\n%s", out)
 					// Update the daemonJSON to include the ZFS mapper settings
-					daemonJSON["storage-driver"] = "zfs"
+					machineDaemonJSON["storage-driver"] = "zfs"
 				} else {
 					log.Debugf("zfs not detected: %s: %s", err, out)
 				}
@@ -159,13 +164,13 @@ func VerifyDockerEngine(m Machine, localCertDir string) error {
 			if err == nil {
 				if strings.ToLower(strings.TrimSpace(out)) == "enforcing" {
 					log.Debug("Detected SELinux in enforcing mode")
-					daemonJSON["selinux-enabled"] = true
+					machineDaemonJSON["selinux-enabled"] = true
 				}
 			}
 
-			data, err := json.Marshal(daemonJSON)
+			data, err := json.Marshal(machineDaemonJSON)
 			if err != nil {
-				resChan <- fmt.Errorf("Failed to generate daemon.json for %s: %s - %#v", m.GetName(), err, daemonJSON)
+				resChan <- fmt.Errorf("Failed to generate daemon.json for %s: %s - %#v", m.GetName(), err, machineDaemonJSON)
 				return
 			}
 
@@ -355,13 +360,18 @@ func VerifyDockerEngineWindows(m Machine, localCertDir string) error {
 			// TODO - why do we sometimes get "lost connection"
 			time.Sleep(500 * time.Millisecond)
 
+			machineDaemonJSON := map[string]interface{}{}
+			for k, v := range daemonJSON {
+				machineDaemonJSON[k] = v
+			}
+
 			// Modify the daemonJSON paths for windows
-			daemonJSON["tlscacert"] = `c:\ProgramData\docker\daemoncerts\ca.pem`
-			daemonJSON["tlscert"] = `c:\ProgramData\docker\daemoncerts\cert.pem`
-			daemonJSON["tlskey"] = `c:\ProgramData\docker\daemoncerts\key.pem`
-			data, err := json.Marshal(daemonJSON)
+			machineDaemonJSON["tlscacert"] = `c:\ProgramData\docker\daemoncerts\ca.pem`
+			machineDaemonJSON["tlscert"] = `c:\ProgramData\docker\daemoncerts\cert.pem`
+			machineDaemonJSON["tlskey"] = `c:\ProgramData\docker\daemoncerts\key.pem`
+			data, err := json.Marshal(machineDaemonJSON)
 			if err != nil {
-				resChan <- fmt.Errorf("Failed to generate daemon.json for %s: %s - %#v", m.GetName(), err, daemonJSON)
+				resChan <- fmt.Errorf("Failed to generate daemon.json for %s: %s - %#v", m.GetName(), err, machineDaemonJSON)
 				return
 			}
 			// Make sure the path exists
