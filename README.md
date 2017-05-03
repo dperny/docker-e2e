@@ -80,7 +80,7 @@ $ testkit create --name myenv e2e.yml
 $ testkit attach myenv
 [do some test changes]
 $ docker build -t e2e .
-$ docker run --net=host -v /var/run/docker.sock:/var/run/docker.sock e2e
+$ docker run -v /var/run/docker.sock:/var/run/docker.sock e2e
 ```
 
 ## Testkit Machines management
